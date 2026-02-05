@@ -356,9 +356,14 @@ func runInit(opts upOptions) (upResult, error) {
 
 func runUpWithTUI(assumeLoggedIn bool, openConsole bool) (upResult, error) {
 	if !assumeLoggedIn {
-		fmt.Println("[seven init] logging in to sprite")
-		if err := runCmd(spriteBin(), nil, "login"); err != nil {
+		if err := ensureSpriteCLI(); err != nil {
 			return upResult{}, err
+		}
+		if _, err := spriteList(); err != nil {
+			fmt.Println(formatStyledBulletLog("[seven init] logging in to sprite"))
+			if err := runCmd(spriteBin(), nil, "login"); err != nil {
+				return upResult{}, err
+			}
 		}
 		assumeLoggedIn = true
 	}
