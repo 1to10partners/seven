@@ -16,6 +16,13 @@ POC: a simple curl-based installer for macOS and Linux:
 curl -fsSL https://raw.githubusercontent.com/1to10partners/seven/main/scripts/install.sh | sh
 ```
 
+### Uninstall
+Remove the installed binary (defaults to `~/.local/bin`):
+
+```sh
+rm -f "$(command -v seven)"
+```
+
 ### Use it in an existing repo
 ```sh
 cd /path/to/your/repo
