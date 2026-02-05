@@ -38,6 +38,9 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "--version", "-v", "version":
+		printVersion()
+		return
 	case "init":
 		cmdInit(os.Args[2:])
 	case "up":
@@ -57,6 +60,7 @@ func main() {
 
 func usage() {
 	fmt.Println("seven - vagrant-style workflow backed by fly.io sprites")
+	fmt.Printf("version: %s\n", version)
 	fmt.Println()
 	fmt.Println("Usage:")
 	fmt.Println("  seven init [--assume-logged-in]")
@@ -65,10 +69,17 @@ func usage() {
 	fmt.Println("  seven status")
 	fmt.Println()
 	fmt.Println("Commands:")
+	fmt.Println("  version  Show version")
 	fmt.Println("  init     One-time setup (login, create sprite, clone repo)")
 	fmt.Println("  up       Create or reuse a sprite, bootstrap repo, open console")
 	fmt.Println("  destroy  Destroy the current sprite and remove .sprite file")
 	fmt.Println("  status   Show sprite status for this repo")
+}
+
+var version = "dev"
+
+func printVersion() {
+	fmt.Println(version)
 }
 
 func cmdUp(args []string) {
@@ -293,7 +304,11 @@ func runInit(opts upOptions) (upResult, error) {
 	}
 
 	opts.Logger("[seven init] creating sprite")
-	if err := runCmdDevNull(spriteBin(), nil, "create", "--skip-console", name); err != nil {
+	if opts.QuietExternal {
+		if err := runCmdQuiet(spriteBin(), nil, "create", "--skip-console", name); err != nil {
+			return upResult{}, err
+		}
+	} else if err := runCmdDevNull(spriteBin(), nil, "create", "--skip-console", name); err != nil {
 		return upResult{}, err
 	}
 
@@ -340,6 +355,19 @@ func runInit(opts upOptions) (upResult, error) {
 }
 
 func runUpWithTUI(assumeLoggedIn bool, openConsole bool) (upResult, error) {
+	if !assumeLoggedIn {
+		if err := ensureSpriteCLI(); err != nil {
+			return upResult{}, err
+		}
+		if _, err := spriteList(); err != nil {
+			fmt.Println(formatStyledBulletLog("[seven init] logging in to sprite"))
+			if err := runCmd(spriteBin(), nil, "login"); err != nil {
+				return upResult{}, err
+			}
+		}
+		assumeLoggedIn = true
+	}
+
 	m := newUpModel()
 	p := tea.NewProgram(m)
 
@@ -646,6 +674,22 @@ func runCmdDevNull(name string, extraEnv []string, args ...string) error {
 	return cmd.Run()
 }
 
+func runCmdQuiet(name string, extraEnv []string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		return err
+	}
+	defer devNull.Close()
+	cmd.Stdin = devNull
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
+	return cmd.Run()
+}
+
 func runCmdOutput(name string, extraEnv []string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	if len(extraEnv) > 0 {
@@ -719,7 +763,6 @@ func (m upModel) View() string {
 	}
 	fmt.Fprintf(b, "%s\n", headerStyle.Render(title))
 	if len(m.logs) > 0 {
-		fmt.Fprintln(b)
 		start := 0
 		if len(m.logs) > 6 {
 			start = len(m.logs) - 6
@@ -735,9 +778,6 @@ func (m upModel) View() string {
 	}
 	if m.err != nil {
 		fmt.Fprintf(b, "\n%s %v\n", errorStyle.Render("error:"), m.err)
-	}
-	if m.err == nil && m.res.Name != "" {
-		fmt.Fprintf(b, "\n%s %s\n", bulletStyle.Render("•"), subtleStyle.Render("sprite: "+m.res.Name))
 	}
 	return b.String()
 }

@@ -91,6 +91,67 @@ func TestSevenUpCreatesSpriteAndWritesFile(t *testing.T) {
 	}
 }
 
+func TestSevenUpSkipsLoginWhenSpriteExists(t *testing.T) {
+	repo := t.TempDir()
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	spriteName := "existing-sprite"
+	if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte(spriteName+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .sprite: %v", err)
+	}
+	if err := os.WriteFile(state, []byte(spriteName+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write state: %v", err)
+	}
+
+	cmd := exec.Command(testSevenBin, "up", "--no-tui")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven up failed: %v\n%s", err, output)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	if strings.Contains(string(logData), "login") {
+		t.Fatalf("expected no login when sprite exists, got: %s", logData)
+	}
+}
+
+func TestSevenUpLogsInWhenSpriteListFails(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	cmd := exec.Command(testSevenBin, "up", "--no-tui")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		"SPRITE_FAIL_LIST=once",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven up failed: %v\n%s", err, output)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	if !strings.Contains(string(logData), "login") {
+		t.Fatalf("expected login when list fails, got: %s", logData)
+	}
+}
+
 func TestSevenInitSetsUpSpriteWithoutConsole(t *testing.T) {
 	repo := createTempRepo(t)
 	state, logPath, cleanup := createFakeSprite(t)
@@ -244,6 +305,18 @@ case "$cmd" in
     exit 0
     ;;
   list)
+    if [ "${SPRITE_FAIL_LIST:-}" = "1" ]; then
+      logit "list (fail)"
+      exit 1
+    fi
+    if [ "${SPRITE_FAIL_LIST:-}" = "once" ]; then
+      failflag="${state}.fail_once"
+      if [ ! -f "$failflag" ]; then
+        logit "list (fail)"
+        echo 1 > "$failflag"
+        exit 1
+      fi
+    fi
     logit "list"
     if [ -f "$state" ]; then
       cat "$state"
