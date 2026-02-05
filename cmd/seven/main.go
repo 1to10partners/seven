@@ -228,6 +228,10 @@ func runUp(opts upOptions) (upResult, error) {
 		return upResult{}, err
 	}
 
+	if err := syncGitIdentity(name, opts); err != nil {
+		return upResult{}, err
+	}
+
 	repoURL, repoSlug, ghToken, err := detectRepoInfo(name, opts)
 	if err != nil {
 		return upResult{}, err
@@ -442,6 +446,39 @@ func detectRepoInfo(spriteName string, opts upOptions) (string, string, string, 
 	}
 
 	return repoURL, repoSlug, ghToken, nil
+}
+
+func syncGitIdentity(spriteName string, opts upOptions) error {
+	if _, err := exec.LookPath("git"); err != nil {
+		return nil
+	}
+
+	name, _ := readGitConfig("user.name")
+	email, _ := readGitConfig("user.email")
+	if name == "" && email == "" {
+		return nil
+	}
+
+	opts.Logger("[seven up] syncing git identity into sprite")
+	if name != "" {
+		if err := spriteExec(spriteName, nil, opts.QuietExternal, "git", "config", "--global", "user.name", name); err != nil {
+			return err
+		}
+	}
+	if email != "" {
+		if err := spriteExec(spriteName, nil, opts.QuietExternal, "git", "config", "--global", "user.email", email); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func readGitConfig(key string) (string, error) {
+	val, err := runCmdOutput("git", nil, "config", "--get", key)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(val), nil
 }
 
 func hasOriginRemote(remotes string) bool {
