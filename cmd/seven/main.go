@@ -137,7 +137,7 @@ func cmdDestroy(args []string) {
 		os.Exit(1)
 	}
 	if exists {
-		if err := runCmd(spriteBin(), nil, "destroy", name); err != nil {
+		if err := runCmd(spriteBin(), nil, "destroy", "--force", name); err != nil {
 			fmt.Fprintf(os.Stderr, "sprite destroy failed: %v\n", err)
 			os.Exit(1)
 		}

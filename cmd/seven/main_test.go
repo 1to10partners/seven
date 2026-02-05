@@ -225,6 +225,9 @@ case "$cmd" in
     exit 0
     ;;
   destroy)
+    if [ "$1" = "--force" ]; then
+      shift
+    fi
     name="$1"
     logit "destroy $name"
     if [ -f "$state" ]; then
