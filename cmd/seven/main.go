@@ -60,7 +60,7 @@ func usage() {
 	fmt.Println()
 	fmt.Println("Usage:")
 	fmt.Println("  seven init [--assume-logged-in]")
-	fmt.Println("  seven up [--tui] [--assume-logged-in] [--no-console]")
+	fmt.Println("  seven up [--assume-logged-in] [--no-console] [--no-tui]")
 	fmt.Println("  seven destroy")
 	fmt.Println("  seven status")
 	fmt.Println()
@@ -73,12 +73,15 @@ func usage() {
 
 func cmdUp(args []string) {
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
-	useTUI := fs.Bool("tui", false, "use experimental TUI (requires non-interactive login)")
+	useTUI := fs.Bool("tui", false, "use TUI (default)")
+	noTUI := fs.Bool("no-tui", false, "disable TUI output")
 	assumeLoggedIn := fs.Bool("assume-logged-in", false, "skip sprite login")
 	noConsole := fs.Bool("no-console", false, "do not open sprite console after up")
 	_ = fs.Parse(args)
 
-	if *useTUI {
+	shouldUseTUI := !*noTUI || *useTUI
+	styleEnabled = shouldUseTUI
+	if shouldUseTUI {
 		res, err := runUpWithTUI(*assumeLoggedIn, !*noConsole)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "seven up failed: %v\n", err)
@@ -670,11 +673,12 @@ type upModel struct {
 }
 
 var (
-	headerStyle = lipgloss.NewStyle().Bold(true)
-	subtleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	bulletStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-	prefixStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("69")).Bold(true)
-	errorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+	headerStyle  = lipgloss.NewStyle().Bold(true)
+	subtleStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	bulletStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	prefixStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("69")).Bold(true)
+	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+	styleEnabled = true
 )
 
 func newUpModel() upModel {
@@ -753,6 +757,9 @@ func splitLogPrefix(line string) (string, string) {
 }
 
 func formatStyledLog(line string) string {
+	if !styleEnabled {
+		return line
+	}
 	prefix, rest := splitLogPrefix(line)
 	if prefix == "" {
 		return line
@@ -761,5 +768,8 @@ func formatStyledLog(line string) string {
 }
 
 func formatStyledBulletLog(line string) string {
+	if !styleEnabled {
+		return line
+	}
 	return fmt.Sprintf("%s %s", bulletStyle.Render("•"), formatStyledLog(line))
 }

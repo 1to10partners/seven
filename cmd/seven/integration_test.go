@@ -45,7 +45,7 @@ func TestIntegrationUpDestroy(t *testing.T) {
 		t.Fatalf("seven init failed: %v", err)
 	}
 
-	cmdUp := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-console")
+	cmdUp := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-console", "--no-tui")
 	cmdUp.Dir = repo
 	cmdUp.Stdout = os.Stdout
 	cmdUp.Stderr = os.Stderr
