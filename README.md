@@ -10,11 +10,10 @@
 
 ## Get Started
 ### Install
-POC: a simple curl-based installer for macOS and Linux. Placeholder command (to be replaced once packaging is finalized):
+POC: a simple curl-based installer for macOS and Linux:
 
 ```sh
-# TODO: replace with the actual installer command
-curl -fsSL https://example.com/seven/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/marc-826/seven/main/scripts/install.sh | sh
 ```
 
 ### Use it in an existing repo
@@ -43,6 +42,14 @@ Integration tests require an interactive Sprite login and will create/destroy a 
 ```sh
 sprite login
 SEVEN_INTEGRATION=1 go test -run TestIntegrationUpDestroy -v ./cmd/seven
+```
+
+### Releases
+We ship binaries via GitHub Releases using GoReleaser. Tag a release to trigger the workflow:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
 ## Implementation Plan
