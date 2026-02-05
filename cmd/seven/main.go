@@ -261,7 +261,11 @@ func runInit(opts upOptions) (upResult, error) {
 
 	if !opts.AssumeLoggedIn {
 		opts.Logger("[seven init] logging in to sprite")
-		if err := runCmd(spriteBin(), nil, "login"); err != nil {
+		if opts.QuietExternal {
+			if err := runCmdQuiet(spriteBin(), nil, "login"); err != nil {
+				return upResult{}, err
+			}
+		} else if err := runCmd(spriteBin(), nil, "login"); err != nil {
 			return upResult{}, err
 		}
 	}
@@ -291,7 +295,11 @@ func runInit(opts upOptions) (upResult, error) {
 	}
 
 	opts.Logger("[seven init] creating sprite")
-	if err := runCmdDevNull(spriteBin(), nil, "create", "--skip-console", name); err != nil {
+	if opts.QuietExternal {
+		if err := runCmdQuiet(spriteBin(), nil, "create", "--skip-console", name); err != nil {
+			return upResult{}, err
+		}
+	} else if err := runCmdDevNull(spriteBin(), nil, "create", "--skip-console", name); err != nil {
 		return upResult{}, err
 	}
 
@@ -644,6 +652,22 @@ func runCmdDevNull(name string, extraEnv []string, args ...string) error {
 	return cmd.Run()
 }
 
+func runCmdQuiet(name string, extraEnv []string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		return err
+	}
+	defer devNull.Close()
+	cmd.Stdin = devNull
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
+	return cmd.Run()
+}
+
 func runCmdOutput(name string, extraEnv []string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	if len(extraEnv) > 0 {
@@ -716,7 +740,6 @@ func (m upModel) View() string {
 	}
 	fmt.Fprintf(b, "%s\n", headerStyle.Render(title))
 	if len(m.logs) > 0 {
-		fmt.Fprintln(b)
 		start := 0
 		if len(m.logs) > 6 {
 			start = len(m.logs) - 6
@@ -732,9 +755,6 @@ func (m upModel) View() string {
 	}
 	if m.err != nil {
 		fmt.Fprintf(b, "\n%s %v\n", errorStyle.Render("error:"), m.err)
-	}
-	if m.err == nil && m.res.Name != "" {
-		fmt.Fprintf(b, "\n%s %s\n", bulletStyle.Render("•"), subtleStyle.Render("sprite: "+m.res.Name))
 	}
 	return b.String()
 }
