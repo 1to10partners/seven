@@ -29,6 +29,12 @@ cd /path/to/your/repo
 seven up
 ```
 
+If you want to run the one-time setup explicitly (login, create sprite, clone repo), use:
+
+```sh
+seven init
+```
+
 ### Start your agent
 ```sh
 codex

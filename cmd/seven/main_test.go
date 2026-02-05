@@ -86,8 +86,51 @@ func TestSevenUpCreatesSpriteAndWritesFile(t *testing.T) {
 	if !strings.Contains(log, "console -s "+name) {
 		t.Fatalf("expected console log, got: %s", log)
 	}
-	if !strings.Contains(log, "exec -s "+name+" gh repo clone") {
+	if !strings.Contains(log, "gh repo clone") {
 		t.Fatalf("expected clone exec log, got: %s", log)
+	}
+}
+
+func TestSevenInitSetsUpSpriteWithoutConsole(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	cmd := exec.Command(testSevenBin, "init", "--assume-logged-in")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven init failed: %v\n%s", err, output)
+	}
+
+	spriteFile := filepath.Join(repo, ".sprite")
+	data, err := os.ReadFile(spriteFile)
+	if err != nil {
+		t.Fatalf("expected .sprite file: %v", err)
+	}
+	name := strings.TrimSpace(string(data))
+	if name == "" {
+		t.Fatalf(".sprite should contain a name")
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "create "+name) {
+		t.Fatalf("expected create log, got: %s", log)
+	}
+	if !strings.Contains(log, "gh repo clone") {
+		t.Fatalf("expected clone exec log, got: %s", log)
+	}
+	if strings.Contains(log, "console -s "+name) {
+		t.Fatalf("did not expect console log, got: %s", log)
 	}
 }
 

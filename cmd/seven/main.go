@@ -37,6 +37,8 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "init":
+		cmdInit(os.Args[2:])
 	case "up":
 		cmdUp(os.Args[2:])
 	case "destroy":
@@ -56,11 +58,13 @@ func usage() {
 	fmt.Println("seven - vagrant-style workflow backed by fly.io sprites")
 	fmt.Println()
 	fmt.Println("Usage:")
+	fmt.Println("  seven init [--assume-logged-in]")
 	fmt.Println("  seven up [--tui] [--assume-logged-in] [--no-console]")
 	fmt.Println("  seven destroy")
 	fmt.Println("  seven status")
 	fmt.Println()
 	fmt.Println("Commands:")
+	fmt.Println("  init     One-time setup (login, create sprite, clone repo)")
 	fmt.Println("  up       Create or reuse a sprite, bootstrap repo, open console")
 	fmt.Println("  destroy  Destroy the current sprite and remove .sprite file")
 	fmt.Println("  status   Show sprite status for this repo")
@@ -103,6 +107,23 @@ func cmdUp(args []string) {
 			fmt.Fprintf(os.Stderr, "failed to open console: %v\n", err)
 			os.Exit(1)
 		}
+	}
+}
+
+func cmdInit(args []string) {
+	fs := flag.NewFlagSet("init", flag.ExitOnError)
+	assumeLoggedIn := fs.Bool("assume-logged-in", false, "skip sprite login")
+	_ = fs.Parse(args)
+
+	_, err := runInit(upOptions{
+		Logger:         func(msg string) { fmt.Println(msg) },
+		QuietExternal:  false,
+		AssumeLoggedIn: *assumeLoggedIn,
+		OpenConsole:    false,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "seven init failed: %v\n", err)
+		os.Exit(1)
 	}
 }
 
@@ -193,13 +214,6 @@ func runUp(opts upOptions) (upResult, error) {
 		return upResult{}, err
 	}
 
-	if !opts.AssumeLoggedIn {
-		opts.Logger("[seven up] logging in to sprite")
-		if err := runCmd(spriteBin(), nil, "login"); err != nil {
-			return upResult{}, err
-		}
-	}
-
 	name, fromFile, err := resolveSpriteName()
 	if err != nil {
 		return upResult{}, err
@@ -209,7 +223,13 @@ func runUp(opts upOptions) (upResult, error) {
 
 	exists, err := spriteExists(name)
 	if err != nil {
-		return upResult{}, err
+		opts.Logger("[seven up] sprite list failed; running init")
+		res, initErr := runInit(opts)
+		if initErr != nil {
+			return upResult{}, initErr
+		}
+		res.OpenConsole = opts.OpenConsole
+		return res, nil
 	}
 	if exists {
 		opts.Logger("[seven up] sprite exists")
@@ -221,12 +241,60 @@ func runUp(opts upOptions) (upResult, error) {
 		return upResult{Name: name, OpenConsole: opts.OpenConsole, SpriteExists: true}, nil
 	}
 
-	opts.Logger("[seven up] creating sprite")
+	res, err := runInit(opts)
+	if err != nil {
+		return upResult{}, err
+	}
+	res.OpenConsole = opts.OpenConsole
+	return res, nil
+}
+
+func runInit(opts upOptions) (upResult, error) {
+	if opts.Logger == nil {
+		opts.Logger = func(string) {}
+	}
+
+	if err := ensureSpriteCLI(); err != nil {
+		return upResult{}, err
+	}
+
+	if !opts.AssumeLoggedIn {
+		opts.Logger("[seven init] logging in to sprite")
+		if err := runCmd(spriteBin(), nil, "login"); err != nil {
+			return upResult{}, err
+		}
+	}
+
+	name, fromFile, err := resolveSpriteName()
+	if err != nil {
+		return upResult{}, err
+	}
+
+	opts.Logger(fmt.Sprintf("[seven init] using sprite name: %s", name))
+
+	exists, err := spriteExists(name)
+	if err != nil {
+		return upResult{}, err
+	}
+	if exists {
+		opts.Logger("[seven init] sprite exists")
+		if !fromFile {
+			if err := writeSpriteFile(name); err != nil {
+				return upResult{}, err
+			}
+		}
+		if err := syncGitIdentity(name, opts); err != nil {
+			return upResult{}, err
+		}
+		return upResult{Name: name, OpenConsole: false, SpriteExists: true}, nil
+	}
+
+	opts.Logger("[seven init] creating sprite")
 	if err := runCmdDevNull(spriteBin(), nil, "create", "--skip-console", name); err != nil {
 		return upResult{}, err
 	}
 
-	opts.Logger("[seven up] writing .sprite")
+	opts.Logger("[seven init] writing .sprite")
 	if err := writeSpriteFile(name); err != nil {
 		return upResult{}, err
 	}
@@ -241,31 +309,31 @@ func runUp(opts upOptions) (upResult, error) {
 	}
 
 	if repoURL == "" {
-		opts.Logger("[seven up] no repo url found, skipping clone")
-		return upResult{Name: name, OpenConsole: opts.OpenConsole, SpriteExists: false}, nil
+		opts.Logger("[seven init] no repo url found, skipping clone")
+		return upResult{Name: name, OpenConsole: false, SpriteExists: false}, nil
 	}
 
 	if repoSlug != "" {
 		if ghToken != "" {
-			opts.Logger(fmt.Sprintf("[seven up] cloning via gh repo clone: %s", repoSlug))
+			opts.Logger(fmt.Sprintf("[seven init] cloning via gh repo clone: %s", repoSlug))
 			if err := spriteExec(name, []string{"GH_TOKEN=" + ghToken}, opts.QuietExternal, "gh", "repo", "clone", repoSlug, name); err != nil {
 				return upResult{}, err
 			}
 		} else {
-			opts.Logger(fmt.Sprintf("[seven up] cloning via gh repo clone (no token): %s", repoSlug))
+			opts.Logger(fmt.Sprintf("[seven init] cloning via gh repo clone (no token): %s", repoSlug))
 			if err := spriteExec(name, nil, opts.QuietExternal, "gh", "repo", "clone", repoSlug, name); err != nil {
 				return upResult{}, err
 			}
 		}
-		return upResult{Name: name, OpenConsole: opts.OpenConsole, SpriteExists: false}, nil
+		return upResult{Name: name, OpenConsole: false, SpriteExists: false}, nil
 	}
 
-	opts.Logger(fmt.Sprintf("[seven up] cloning via git clone: %s", repoURL))
+	opts.Logger(fmt.Sprintf("[seven init] cloning via git clone: %s", repoURL))
 	if err := spriteExec(name, nil, opts.QuietExternal, "git", "clone", repoURL, name); err != nil {
 		return upResult{}, err
 	}
 
-	return upResult{Name: name, OpenConsole: opts.OpenConsole, SpriteExists: false}, nil
+	return upResult{Name: name, OpenConsole: false, SpriteExists: false}, nil
 }
 
 func runUpWithTUI(assumeLoggedIn bool, openConsole bool) (upResult, error) {
@@ -396,7 +464,7 @@ func spriteExists(name string) (bool, error) {
 
 func detectRepoInfo(spriteName string, opts upOptions) (string, string, string, error) {
 	if _, err := exec.LookPath("git"); err != nil {
-		opts.Logger("[seven up] git not found")
+		opts.Logger("[seven init] git not found")
 		return "", "", "", nil
 	}
 
@@ -407,7 +475,7 @@ func detectRepoInfo(spriteName string, opts upOptions) (string, string, string, 
 
 	inside, err := runCmdOutput("git", nil, "-C", cwd, "rev-parse", "--is-inside-work-tree")
 	if err != nil || strings.TrimSpace(inside) != "true" {
-		opts.Logger("[seven up] not inside a git repo")
+		opts.Logger("[seven init] not inside a git repo")
 		return "", "", "", nil
 	}
 
@@ -417,7 +485,7 @@ func detectRepoInfo(spriteName string, opts upOptions) (string, string, string, 
 	}
 	remotes = strings.TrimSpace(remotes)
 	if remotes != "" {
-		opts.Logger(fmt.Sprintf("[seven up] git remotes: %s", remotes))
+		opts.Logger(fmt.Sprintf("[seven init] git remotes: %s", remotes))
 	}
 
 	if !hasOriginRemote(remotes) {
@@ -433,7 +501,7 @@ func detectRepoInfo(spriteName string, opts upOptions) (string, string, string, 
 		return "", "", "", nil
 	}
 
-	opts.Logger(fmt.Sprintf("[seven up] repo url: %s", repoURL))
+	opts.Logger(fmt.Sprintf("[seven init] repo url: %s", repoURL))
 
 	repoSlug := githubRepoSlug(repoURL)
 	ghToken := ""
@@ -445,7 +513,7 @@ func detectRepoInfo(spriteName string, opts upOptions) (string, string, string, 
 	}
 
 	if ghToken != "" {
-		opts.Logger("[seven up] authenticating gh inside sprite")
+		opts.Logger("[seven init] authenticating gh inside sprite")
 		_ = spriteExec(spriteName, []string{"GH_TOKEN=" + ghToken}, opts.QuietExternal, "gh", "auth", "status")
 	}
 
@@ -463,7 +531,7 @@ func syncGitIdentity(spriteName string, opts upOptions) error {
 		return nil
 	}
 
-	opts.Logger("[seven up] syncing git identity into sprite")
+	opts.Logger("[seven init] syncing git identity into sprite")
 	if name != "" {
 		if err := spriteExec(spriteName, nil, opts.QuietExternal, "git", "config", "--global", "user.name", name); err != nil {
 			return err
