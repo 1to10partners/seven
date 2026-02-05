@@ -30,10 +30,20 @@ codex
 claude
 ```
 
+
 ## Rationale
 - **Isolation without VM overhead.** Sprites provide a fit-for-purpose environment for code execution without the cost and complexity of local virtual machines.
 - **Agentic safety.** Strong isolation reduces risk when running tools that can read/write files, make network calls, or execute code.
 - **Network performance.** Remote execution near inference APIs can be faster and more reliable than local VM networking.
+
+## Contributing
+### Integration tests (interactive)
+Integration tests require an interactive Sprite login and will create/destroy a temporary sprite.
+
+```sh
+sprite login
+SEVEN_INTEGRATION=1 go test -run TestIntegrationUpDestroy -v ./cmd/seven
+```
 
 ## Implementation Plan
 The current fish scripts (`sprite_up`/`sprite_destroy`) define the baseline behavior. The plan below maps that flow into a robust, cross-platform CLI built with Bubble Tea.

@@ -5,14 +5,23 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestIntegrationUpDestroy(t *testing.T) {
 	if os.Getenv("SEVEN_INTEGRATION") != "1" {
 		t.Skip("set SEVEN_INTEGRATION=1 to run integration tests")
 	}
+
+	token, ok := loadSpriteToken()
+	if !ok {
+		t.Skip("SPRITE_TOKEN not set (must be a spr_ API token)")
+	}
+	restoreEnv := setEnv("SPRITE_TOKEN", token)
+	defer restoreEnv()
 
 	if _, err := exec.LookPath("sprite"); err != nil {
 		t.Skip("sprite CLI not found in PATH")
@@ -22,11 +31,16 @@ func TestIntegrationUpDestroy(t *testing.T) {
 	}
 
 	repo := t.TempDir()
+	name := uniqueSpriteName()
+	if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte(name+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .sprite: %v", err)
+	}
 
 	cmdUp := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-console")
 	cmdUp.Dir = repo
 	cmdUp.Stdout = os.Stdout
 	cmdUp.Stderr = os.Stderr
+	cmdUp.Env = os.Environ()
 	if err := cmdUp.Run(); err != nil {
 		t.Fatalf("seven up failed: %v", err)
 	}
@@ -36,7 +50,7 @@ func TestIntegrationUpDestroy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected .sprite file: %v", err)
 	}
-	name := strings.TrimSpace(string(data))
+	name = strings.TrimSpace(string(data))
 	if name == "" {
 		t.Fatalf(".sprite should contain a name")
 	}
@@ -67,7 +81,33 @@ func destroySprite(t *testing.T, repo string) {
 	cmdDestroy.Dir = repo
 	cmdDestroy.Stdout = os.Stdout
 	cmdDestroy.Stderr = os.Stderr
+	cmdDestroy.Env = os.Environ()
 	if err := cmdDestroy.Run(); err != nil {
 		t.Fatalf("seven destroy failed: %v", err)
+	}
+}
+
+func uniqueSpriteName() string {
+	suffix := time.Now().UnixNano()
+	return "seven-it-" + strconv.FormatInt(suffix, 10)
+}
+
+func loadSpriteToken() (string, bool) {
+	token := strings.TrimSpace(os.Getenv("SPRITE_TOKEN"))
+	if token == "" {
+		return "", false
+	}
+	return token, true
+}
+
+func setEnv(key, value string) func() {
+	prev, had := os.LookupEnv(key)
+	_ = os.Setenv(key, value)
+	return func() {
+		if had {
+			_ = os.Setenv(key, prev)
+		} else {
+			_ = os.Unsetenv(key)
+		}
 	}
 }
