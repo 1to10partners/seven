@@ -72,49 +72,29 @@ goreleaser check
 goreleaser release --snapshot --clean
 ```
 
-## Implementation Plan
-The current fish scripts (`sprite_up`/`sprite_destroy`) define the baseline behavior. The plan below maps that flow into a robust, cross-platform CLI built with Bubble Tea.
+## Implementation Plan (short)
+- **Core CLI:** `seven init`, `seven up`, `seven destroy`, `seven status`.
+- **Bootstrap:** resolve sprite name, create/reuse sprite, clone repo when possible.
+- **TUI:** minimal Bubble Tea flow with progress and clean status output.
+- **Packaging:** GitHub Releases + curl installer (primary), package managers later.
 
-### Phase 1: CLI foundations
-- Initialize a Go CLI with a single `seven` binary.
-- Implement commands:
-  - `seven up` (create or reuse a sprite, open console)
-  - `seven destroy` (delete sprite, remove local marker file)
-  - `seven status` (show sprite existence + health)
-- Add a config/marker file (`.sprite`) to pin the sprite name for the repo.
+## Upcoming: IDE + Networking Experience
+### 1) IDE connection (VS Code and others)
+Goal: open the sprite workspace in your local IDE without losing native tooling.
 
-### Phase 2: Sprite lifecycle logic
-- Name resolution:
-  - Default to `basename(pwd)` unless `.sprite` overrides it.
-  - Validate names and provide helpful errors.
-- Create/reuse logic:
-  - If sprite exists, reuse and open console.
-  - If not, create with `sprite create --skip-console`.
-- Destroy logic:
-  - Remove local `.sprite` file.
-  - Destroy sprite if it exists.
+Planned approach:
+- **Session-first UX:** `seven up` opens a shell via `sprite console`, while `seven exec` (and the CLI’s `sprite exec`) can run commands in the sprite with full TTY support. citeturn1view0
+- **IDE adapters:** add a `seven ide` flow that can:
+  - detect an SSH-capable endpoint if Sprites exposes one,
+  - or fall back to syncing + remote commands (git-based or file sync) when SSH isn’t available.
 
-### Phase 3: Repo bootstrap
-- Detect git repo and `origin` remote.
-- If GitHub remote:
-  - Use `gh auth token` if available for faster clone.
-  - `gh repo clone <owner/repo> <sprite-name>`.
-- Else fallback to `git clone <repo-url> <sprite-name>`.
+### 2) Feedback loop + port forwarding
+Goal: run the app inside the sprite and access it locally as if it were running on your machine.
 
-### Phase 4: TUI experience (Bubble Tea)
-- Add a guided flow for `seven up`:
-  - status spinner, name confirm/override, progress logs.
-- Provide success/failure summary with next actions.
-- Make it easy to cancel safely (Ctrl+C).
-
-### Phase 5: polish + docs
-- Structured logging and clear error messages.
-- Extend README with examples, troubleshooting, and FAQ.
-- Add tests for name resolution, `.sprite` handling, and command invocation.
-- Document installation:
-  - **Primary:** prebuilt binaries per OS/arch (GitHub Releases).
-  - **Convenience:** package managers (Homebrew/Scoop/Winget) as optional wrappers.
-  - **POC focus:** a simple curl-based installer that fetches the correct release asset.
+Planned approach:
+- **Forwarding:** use `sprite proxy` to forward local ports to the sprite. citeturn1view1
+- **Auto-discovery:** detect ports by heuristics (common dev ports, package scripts, Docker compose, `.env`, or a user-specified list).
+- **Command surface:** add `seven forward` (and/or `seven dev`) to start the app in the sprite and wire up ports in one step.
 
 ## References
 - Fly.io Sprite docs: https://docs.sprites.dev/
