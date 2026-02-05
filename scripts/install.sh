@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -e
 
-REPO="marc-826/seven"
+REPO="1to10partners/seven"
 BINARY="seven"
 
 if [ -n "$SEVEN_INSTALL_DIR" ]; then

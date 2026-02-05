@@ -37,7 +37,7 @@ checksum:
 
 release:
   github:
-    owner: marc-826
+    owner: 1to10partners
     name: seven
 
 changelog:

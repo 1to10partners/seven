@@ -13,7 +13,7 @@
 POC: a simple curl-based installer for macOS and Linux:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/marc-826/seven/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/1to10partners/seven/main/scripts/install.sh | sh
 ```
 
 ### Use it in an existing repo
