@@ -52,6 +52,13 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
+To test the release process locally without publishing (requires `goreleaser`):
+
+```sh
+goreleaser check
+goreleaser release --snapshot --clean
+```
+
 ## Implementation Plan
 The current fish scripts (`sprite_up`/`sprite_destroy`) define the baseline behavior. The plan below maps that flow into a robust, cross-platform CLI built with Bubble Tea.
 
