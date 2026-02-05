@@ -38,6 +38,9 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "--version", "-v", "version":
+		printVersion()
+		return
 	case "init":
 		cmdInit(os.Args[2:])
 	case "up":
@@ -57,6 +60,7 @@ func main() {
 
 func usage() {
 	fmt.Println("seven - vagrant-style workflow backed by fly.io sprites")
+	fmt.Printf("version: %s\n", version)
 	fmt.Println()
 	fmt.Println("Usage:")
 	fmt.Println("  seven init [--assume-logged-in]")
@@ -65,10 +69,17 @@ func usage() {
 	fmt.Println("  seven status")
 	fmt.Println()
 	fmt.Println("Commands:")
+	fmt.Println("  version  Show version")
 	fmt.Println("  init     One-time setup (login, create sprite, clone repo)")
 	fmt.Println("  up       Create or reuse a sprite, bootstrap repo, open console")
 	fmt.Println("  destroy  Destroy the current sprite and remove .sprite file")
 	fmt.Println("  status   Show sprite status for this repo")
+}
+
+var version = "dev"
+
+func printVersion() {
+	fmt.Println(version)
 }
 
 func cmdUp(args []string) {
@@ -263,11 +274,7 @@ func runInit(opts upOptions) (upResult, error) {
 
 	if !opts.AssumeLoggedIn {
 		opts.Logger("[seven init] logging in to sprite")
-		if opts.QuietExternal {
-			if err := runCmdQuiet(spriteBin(), nil, "login"); err != nil {
-				return upResult{}, err
-			}
-		} else if err := runCmd(spriteBin(), nil, "login"); err != nil {
+		if err := runCmd(spriteBin(), nil, "login"); err != nil {
 			return upResult{}, err
 		}
 	}
@@ -348,6 +355,14 @@ func runInit(opts upOptions) (upResult, error) {
 }
 
 func runUpWithTUI(assumeLoggedIn bool, openConsole bool) (upResult, error) {
+	if !assumeLoggedIn {
+		fmt.Println("[seven init] logging in to sprite")
+		if err := runCmd(spriteBin(), nil, "login"); err != nil {
+			return upResult{}, err
+		}
+		assumeLoggedIn = true
+	}
+
 	m := newUpModel()
 	p := tea.NewProgram(m)
 
