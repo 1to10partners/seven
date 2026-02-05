@@ -13,6 +13,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 type upResult struct {
@@ -366,7 +367,7 @@ func runUpWithTUI(assumeLoggedIn bool, openConsole bool) (upResult, error) {
 }
 
 func runConsole(name string) error {
-	fmt.Printf("[seven up] opening console: %s\n", name)
+	fmt.Println(formatStyledBulletLog(fmt.Sprintf("[seven up] opening console: %s", name)))
 	return runCmd(spriteBin(), nil, "console", "-s", name)
 }
 
@@ -668,6 +669,14 @@ type upModel struct {
 	err     error
 }
 
+var (
+	headerStyle = lipgloss.NewStyle().Bold(true)
+	subtleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	bulletStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	prefixStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("69")).Bold(true)
+	errorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+)
+
 func newUpModel() upModel {
 	sp := spinner.New()
 	sp.Spinner = spinner.Line
@@ -701,12 +710,56 @@ func (m upModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m upModel) View() string {
 	b := &strings.Builder{}
-	fmt.Fprintf(b, "%s seven up\n\n", m.spinner.View())
-	for _, line := range m.logs {
-		fmt.Fprintf(b, "%s\n", line)
+	title := fmt.Sprintf("%s seven up", m.spinner.View())
+	if m.err != nil {
+		title = fmt.Sprintf("! seven up")
+	}
+	fmt.Fprintf(b, "%s\n", headerStyle.Render(title))
+	if len(m.logs) > 0 {
+		fmt.Fprintln(b)
+		start := 0
+		if len(m.logs) > 6 {
+			start = len(m.logs) - 6
+		}
+		for _, line := range m.logs[start:] {
+			prefix, rest := splitLogPrefix(line)
+			if prefix != "" {
+				fmt.Fprintf(b, "%s %s %s\n", bulletStyle.Render("•"), prefixStyle.Render(prefix), subtleStyle.Render(rest))
+				continue
+			}
+			fmt.Fprintf(b, "%s %s\n", bulletStyle.Render("•"), subtleStyle.Render(line))
+		}
 	}
 	if m.err != nil {
-		fmt.Fprintf(b, "\nerror: %v\n", m.err)
+		fmt.Fprintf(b, "\n%s %v\n", errorStyle.Render("error:"), m.err)
+	}
+	if m.err == nil && m.res.Name != "" {
+		fmt.Fprintf(b, "\n%s %s\n", bulletStyle.Render("•"), subtleStyle.Render("sprite: "+m.res.Name))
 	}
 	return b.String()
+}
+
+func splitLogPrefix(line string) (string, string) {
+	if !strings.HasPrefix(line, "[") {
+		return "", ""
+	}
+	idx := strings.Index(line, "]")
+	if idx == -1 {
+		return "", ""
+	}
+	prefix := line[:idx+1]
+	rest := strings.TrimSpace(line[idx+1:])
+	return prefix, rest
+}
+
+func formatStyledLog(line string) string {
+	prefix, rest := splitLogPrefix(line)
+	if prefix == "" {
+		return line
+	}
+	return fmt.Sprintf("%s %s", prefixStyle.Render(prefix), subtleStyle.Render(rest))
+}
+
+func formatStyledBulletLog(line string) string {
+	return fmt.Sprintf("%s %s", bulletStyle.Render("•"), formatStyledLog(line))
 }
