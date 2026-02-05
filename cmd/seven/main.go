@@ -25,6 +25,7 @@ type upOptions struct {
 	Logger         func(string)
 	QuietExternal  bool
 	AssumeLoggedIn bool
+	OpenConsole    bool
 }
 
 var spritePath string
@@ -55,7 +56,7 @@ func usage() {
 	fmt.Println("seven - vagrant-style workflow backed by fly.io sprites")
 	fmt.Println()
 	fmt.Println("Usage:")
-	fmt.Println("  seven up [--tui] [--assume-logged-in]")
+	fmt.Println("  seven up [--tui] [--assume-logged-in] [--no-console]")
 	fmt.Println("  seven destroy")
 	fmt.Println("  seven status")
 	fmt.Println()
@@ -69,10 +70,11 @@ func cmdUp(args []string) {
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
 	useTUI := fs.Bool("tui", false, "use experimental TUI (requires non-interactive login)")
 	assumeLoggedIn := fs.Bool("assume-logged-in", false, "skip sprite login")
+	noConsole := fs.Bool("no-console", false, "do not open sprite console after up")
 	_ = fs.Parse(args)
 
 	if *useTUI {
-		res, err := runUpWithTUI(*assumeLoggedIn)
+		res, err := runUpWithTUI(*assumeLoggedIn, !*noConsole)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "seven up failed: %v\n", err)
 			os.Exit(1)
@@ -90,6 +92,7 @@ func cmdUp(args []string) {
 		Logger:         func(msg string) { fmt.Println(msg) },
 		QuietExternal:  false,
 		AssumeLoggedIn: *assumeLoggedIn,
+		OpenConsole:    !*noConsole,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "seven up failed: %v\n", err)
@@ -215,7 +218,7 @@ func runUp(opts upOptions) (upResult, error) {
 				return upResult{}, err
 			}
 		}
-		return upResult{Name: name, OpenConsole: true, SpriteExists: true}, nil
+		return upResult{Name: name, OpenConsole: opts.OpenConsole, SpriteExists: true}, nil
 	}
 
 	opts.Logger("[seven up] creating sprite")
@@ -239,7 +242,7 @@ func runUp(opts upOptions) (upResult, error) {
 
 	if repoURL == "" {
 		opts.Logger("[seven up] no repo url found, skipping clone")
-		return upResult{Name: name, OpenConsole: true, SpriteExists: false}, nil
+		return upResult{Name: name, OpenConsole: opts.OpenConsole, SpriteExists: false}, nil
 	}
 
 	if repoSlug != "" {
@@ -254,7 +257,7 @@ func runUp(opts upOptions) (upResult, error) {
 				return upResult{}, err
 			}
 		}
-		return upResult{Name: name, OpenConsole: true, SpriteExists: false}, nil
+		return upResult{Name: name, OpenConsole: opts.OpenConsole, SpriteExists: false}, nil
 	}
 
 	opts.Logger(fmt.Sprintf("[seven up] cloning via git clone: %s", repoURL))
@@ -262,10 +265,10 @@ func runUp(opts upOptions) (upResult, error) {
 		return upResult{}, err
 	}
 
-	return upResult{Name: name, OpenConsole: true, SpriteExists: false}, nil
+	return upResult{Name: name, OpenConsole: opts.OpenConsole, SpriteExists: false}, nil
 }
 
-func runUpWithTUI(assumeLoggedIn bool) (upResult, error) {
+func runUpWithTUI(assumeLoggedIn bool, openConsole bool) (upResult, error) {
 	m := newUpModel()
 	p := tea.NewProgram(m)
 
@@ -275,6 +278,7 @@ func runUpWithTUI(assumeLoggedIn bool) (upResult, error) {
 			// TUI mode captures output for cleaner display.
 			QuietExternal:  true,
 			AssumeLoggedIn: assumeLoggedIn,
+			OpenConsole:    openConsole,
 		})
 		p.Send(doneMsg{res: res, err: err})
 	}()
