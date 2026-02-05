@@ -45,7 +45,7 @@ func TestSevenUpCreatesSpriteAndWritesFile(t *testing.T) {
 	state, logPath, cleanup := createFakeSprite(t)
 	defer cleanup()
 
-	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in")
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui")
 	cmd.Dir = repo
 	cmd.Env = append(os.Environ(),
 		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
