@@ -57,6 +57,15 @@ sprite login
 SEVEN_INTEGRATION=1 go test -run TestIntegrationUpDestroy -v ./cmd/seven
 ```
 
+### Commands (dev workflow)
+```sh
+make build
+./build/seven init
+./build/seven up --no-tui
+./build/seven status
+./build/seven destroy
+```
+
 ### Releases
 We ship binaries via GitHub Releases using GoReleaser. Tag a release to trigger the workflow:
 

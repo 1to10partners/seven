@@ -73,13 +73,12 @@ func usage() {
 
 func cmdUp(args []string) {
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
-	useTUI := fs.Bool("tui", false, "use TUI (default)")
 	noTUI := fs.Bool("no-tui", false, "disable TUI output")
 	assumeLoggedIn := fs.Bool("assume-logged-in", false, "skip sprite login")
 	noConsole := fs.Bool("no-console", false, "do not open sprite console after up")
 	_ = fs.Parse(args)
 
-	shouldUseTUI := !*noTUI || *useTUI
+	shouldUseTUI := !*noTUI
 	styleEnabled = shouldUseTUI
 	if shouldUseTUI {
 		res, err := runUpWithTUI(*assumeLoggedIn, !*noConsole)
