@@ -16,13 +16,6 @@ func TestIntegrationUpDestroy(t *testing.T) {
 		t.Skip("set SEVEN_INTEGRATION=1 to run integration tests")
 	}
 
-	token, ok := loadSpriteToken()
-	if !ok {
-		t.Skip("SPRITE_TOKEN not set (must be a spr_ API token)")
-	}
-	restoreEnv := setEnv("SPRITE_TOKEN", token)
-	defer restoreEnv()
-
 	if _, err := exec.LookPath("sprite"); err != nil {
 		t.Skip("sprite CLI not found in PATH")
 	}
@@ -81,13 +74,6 @@ func TestIntegrationInitWithGitRemote(t *testing.T) {
 		t.Skip("set SEVEN_INTEGRATION=1 to run integration tests")
 	}
 
-	token, ok := loadSpriteToken()
-	if !ok {
-		t.Skip("SPRITE_TOKEN not set (must be a spr_ API token)")
-	}
-	restoreEnv := setEnv("SPRITE_TOKEN", token)
-	defer restoreEnv()
-
 	if _, err := exec.LookPath("sprite"); err != nil {
 		t.Skip("sprite CLI not found in PATH")
 	}
@@ -127,6 +113,53 @@ func TestIntegrationInitWithGitRemote(t *testing.T) {
 	}
 
 	destroySprite(t, repo)
+}
+
+func TestIntegrationInitNormalizesForbiddenDirName(t *testing.T) {
+	if os.Getenv("SEVEN_INTEGRATION") != "1" {
+		t.Skip("set SEVEN_INTEGRATION=1 to run integration tests")
+	}
+
+	if _, err := exec.LookPath("sprite"); err != nil {
+		t.Skip("sprite CLI not found in PATH")
+	}
+	if err := exec.Command("sprite", "list").Run(); err != nil {
+		t.Skip("sprite list failed; ensure you are logged in")
+	}
+
+	parent := t.TempDir()
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 10)
+	dirName := "seven.it-" + suffix
+	expectedSprite := "seven-it-" + suffix
+	repo := filepath.Join(parent, dirName)
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatalf("failed to create repo dir: %v", err)
+	}
+
+	cmdInit := exec.Command(testSevenBin, "init", "--assume-logged-in")
+	cmdInit.Dir = repo
+	cmdInit.Stdout = os.Stdout
+	cmdInit.Stderr = os.Stderr
+	cmdInit.Env = os.Environ()
+	if err := cmdInit.Run(); err != nil {
+		t.Fatalf("seven init failed: %v", err)
+	}
+
+	spriteFile := filepath.Join(repo, ".sprite")
+	data, err := os.ReadFile(spriteFile)
+	if err != nil {
+		t.Fatalf("expected .sprite file: %v", err)
+	}
+	name := strings.TrimSpace(string(data))
+	if name != expectedSprite {
+		t.Fatalf("expected normalized sprite name %q, got %q", expectedSprite, name)
+	}
+
+	defer destroySprite(t, repo)
+
+	if !spriteListed(name) {
+		t.Fatalf("sprite not found in list: %s", name)
+	}
 }
 
 func spriteListed(name string) bool {
@@ -172,24 +205,4 @@ func runCmdInDir(dir, name string, args ...string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
-}
-
-func loadSpriteToken() (string, bool) {
-	token := strings.TrimSpace(os.Getenv("SPRITE_TOKEN"))
-	if token == "" {
-		return "", false
-	}
-	return token, true
-}
-
-func setEnv(key, value string) func() {
-	prev, had := os.LookupEnv(key)
-	_ = os.Setenv(key, value)
-	return func() {
-		if had {
-			_ = os.Setenv(key, prev)
-		} else {
-			_ = os.Unsetenv(key)
-		}
-	}
 }

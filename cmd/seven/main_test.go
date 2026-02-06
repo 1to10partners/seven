@@ -260,6 +260,80 @@ func TestSevenDestroy(t *testing.T) {
 	}
 }
 
+func TestNormalizeSpriteName(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{in: "trems.al", want: "trems-al"},
+		{in: "My_Repo", want: "my-repo"},
+		{in: "--bad--", want: "bad"},
+		{in: "a..b", want: "a-b"},
+		{in: "UPPER", want: "upper"},
+	}
+
+	for _, tc := range cases {
+		if got := normalizeSpriteName(tc.in); got != tc.want {
+			t.Fatalf("normalizeSpriteName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestResolveSpriteNameNormalizesDirName(t *testing.T) {
+	parent := t.TempDir()
+	repo := filepath.Join(parent, "trems.al")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatalf("failed to make repo dir: %v", err)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get cwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(cwd)
+	})
+	if err := os.Chdir(repo); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+
+	info, err := resolveSpriteName()
+	if err != nil {
+		t.Fatalf("resolveSpriteName failed: %v", err)
+	}
+	if info.Name != "trems-al" {
+		t.Fatalf("expected normalized name trems-al, got %q", info.Name)
+	}
+	if !info.Normalized {
+		t.Fatalf("expected normalization to be true")
+	}
+	if info.FromFile {
+		t.Fatalf("expected fromFile=false")
+	}
+}
+
+func TestResolveSpriteNameRejectsInvalidFromFile(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte("bad.name\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .sprite: %v", err)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get cwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(cwd)
+	})
+	if err := os.Chdir(repo); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+
+	if _, err := resolveSpriteName(); err == nil {
+		t.Fatalf("expected resolveSpriteName to fail for invalid .sprite")
+	}
+}
+
 func createTempRepo(t *testing.T) string {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {

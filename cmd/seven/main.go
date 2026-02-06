@@ -29,7 +29,15 @@ type upOptions struct {
 	OpenConsole    bool
 }
 
+type spriteNameInfo struct {
+	Name       string
+	FromFile   bool
+	Original   string
+	Normalized bool
+}
+
 var spritePath string
+var spriteNamePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 
 func main() {
 	if len(os.Args) < 2 {
@@ -145,11 +153,12 @@ func cmdDestroy(args []string) {
 	fs := flag.NewFlagSet("destroy", flag.ExitOnError)
 	_ = fs.Parse(args)
 
-	name, _, err := resolveSpriteName()
+	info, err := resolveSpriteName()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to resolve sprite name: %v\n", err)
 		os.Exit(1)
 	}
+	name := info.Name
 
 	if err := ensureSpriteCLI(); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
@@ -187,11 +196,13 @@ func cmdStatus(args []string) {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	_ = fs.Parse(args)
 
-	name, fromFile, err := resolveSpriteName()
+	info, err := resolveSpriteName()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to resolve sprite name: %v\n", err)
 		os.Exit(1)
 	}
+	name := info.Name
+	fromFile := info.FromFile
 
 	if err := ensureSpriteCLI(); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
@@ -228,10 +239,15 @@ func runUp(opts upOptions) (upResult, error) {
 		return upResult{}, err
 	}
 
-	name, fromFile, err := resolveSpriteName()
+	info, err := resolveSpriteName()
 	if err != nil {
 		return upResult{}, err
 	}
+	if info.Normalized && !info.FromFile {
+		opts.Logger(fmt.Sprintf("[seven up] normalized sprite name from %q to %q (set .sprite to override)", info.Original, info.Name))
+	}
+	name := info.Name
+	fromFile := info.FromFile
 
 	opts.Logger(fmt.Sprintf("[seven up] using sprite name: %s", name))
 
@@ -279,10 +295,15 @@ func runInit(opts upOptions) (upResult, error) {
 		}
 	}
 
-	name, fromFile, err := resolveSpriteName()
+	info, err := resolveSpriteName()
 	if err != nil {
 		return upResult{}, err
 	}
+	if info.Normalized && !info.FromFile {
+		opts.Logger(fmt.Sprintf("[seven init] normalized sprite name from %q to %q (set .sprite to override)", info.Original, info.Name))
+	}
+	name := info.Name
+	fromFile := info.FromFile
 
 	opts.Logger(fmt.Sprintf("[seven init] using sprite name: %s", name))
 
@@ -401,10 +422,10 @@ func runConsole(name string) error {
 	return runCmd(spriteBin(), nil, "console", "-s", name)
 }
 
-func resolveSpriteName() (string, bool, error) {
+func resolveSpriteName() (spriteNameInfo, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return "", false, err
+		return spriteNameInfo{}, err
 	}
 
 	name := filepath.Base(cwd)
@@ -418,7 +439,25 @@ func resolveSpriteName() (string, bool, error) {
 		}
 	}
 
-	return name, fromFile, nil
+	info := spriteNameInfo{
+		Name:     name,
+		FromFile: fromFile,
+		Original: name,
+	}
+	if fromFile {
+		if err := validateSpriteName(info.Name); err != nil {
+			return spriteNameInfo{}, fmt.Errorf("invalid sprite name in .sprite: %w", err)
+		}
+		return info, nil
+	}
+
+	normalized := normalizeSpriteName(info.Name)
+	info.Name = normalized
+	info.Normalized = normalized != info.Original
+	if err := validateSpriteName(info.Name); err != nil {
+		return spriteNameInfo{}, fmt.Errorf("invalid sprite name derived from directory %q: %w (set a valid name in .sprite to override)", info.Original, err)
+	}
+	return info, nil
 }
 
 func writeSpriteFile(name string) error {
@@ -443,6 +482,46 @@ func removeSpriteFile() error {
 		return err
 	}
 	return os.Remove(path)
+}
+
+func normalizeSpriteName(name string) string {
+	name = strings.ToLower(name)
+	var b strings.Builder
+	lastHyphen := false
+
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastHyphen = false
+			continue
+		}
+		if r == '-' {
+			if b.Len() > 0 && !lastHyphen {
+				b.WriteRune('-')
+				lastHyphen = true
+			}
+			continue
+		}
+		if b.Len() > 0 && !lastHyphen {
+			b.WriteRune('-')
+			lastHyphen = true
+		}
+	}
+
+	return strings.Trim(b.String(), "-")
+}
+
+func validateSpriteName(name string) error {
+	if name == "" {
+		return errors.New("sprite name is empty")
+	}
+	if len(name) > 63 {
+		return fmt.Errorf("sprite name %q is too long (max 63 characters)", name)
+	}
+	if !spriteNamePattern.MatchString(name) {
+		return fmt.Errorf("sprite name %q is invalid (use lowercase letters, numbers, hyphens, start/end with a letter or number)", name)
+	}
+	return nil
 }
 
 func ensureSpriteCLI() error {
