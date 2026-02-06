@@ -346,6 +346,9 @@ func runInit(opts upOptions) (upResult, error) {
 	if err != nil {
 		return upResult{}, err
 	}
+	if err := ensureGhAuthInSprite(name, ghToken, opts); err != nil {
+		opts.Logger(fmt.Sprintf("[seven init] gh auth setup failed: %v", err))
+	}
 
 	if repoURL == "" {
 		opts.Logger("[seven init] no repo url found, skipping clone")
@@ -623,11 +626,29 @@ func detectRepoInfo(spriteName string, opts upOptions) (string, string, string, 
 	}
 
 	if ghToken != "" {
-		opts.Logger("[seven init] authenticating gh inside sprite")
-		_ = spriteExec(spriteName, []string{"GH_TOKEN=" + ghToken}, opts.QuietExternal, "gh", "auth", "status")
+		opts.Logger("[seven init] detected gh token on host")
 	}
 
 	return repoURL, repoSlug, ghToken, nil
+}
+
+func ensureGhAuthInSprite(spriteName, ghToken string, opts upOptions) error {
+	if ghToken == "" {
+		return nil
+	}
+
+	opts.Logger("[seven init] configuring gh auth inside sprite")
+	env := []string{"GH_TOKEN=" + ghToken}
+	if err := spriteExec(spriteName, env, opts.QuietExternal, "sh", "-lc", "command -v gh >/dev/null 2>&1"); err != nil {
+		return fmt.Errorf("gh not found in sprite: %w", err)
+	}
+	if err := spriteExec(spriteName, env, opts.QuietExternal, "sh", "-lc", "printf '%s' \"$GH_TOKEN\" | gh auth login --with-token"); err != nil {
+		return fmt.Errorf("gh auth login failed: %w", err)
+	}
+	if err := spriteExec(spriteName, env, opts.QuietExternal, "gh", "auth", "setup-git"); err != nil {
+		return fmt.Errorf("gh auth setup-git failed: %w", err)
+	}
+	return nil
 }
 
 func syncGitIdentity(spriteName string, opts upOptions) error {

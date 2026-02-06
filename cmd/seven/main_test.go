@@ -260,6 +260,52 @@ func TestSevenDestroy(t *testing.T) {
 	}
 }
 
+func TestSevenInitConfiguresGhAuthInSprite(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	ghBin := t.TempDir()
+	token := "gh-test-token"
+	ghScript := `#!/bin/sh
+if [ "$1" = "auth" ] && [ "$2" = "token" ]; then
+  echo "` + token + `"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(ghBin, "gh"), []byte(ghScript), 0o755); err != nil {
+		t.Fatalf("failed to write fake gh: %v", err)
+	}
+
+	cmd := exec.Command(testSevenBin, "init", "--assume-logged-in")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"PATH="+ghBin+string(os.PathListSeparator)+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven init failed: %v\n%s", err, output)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "gh auth login --with-token") {
+		t.Fatalf("expected gh auth login in sprite, got: %s", log)
+	}
+	if !strings.Contains(log, "gh auth setup-git") {
+		t.Fatalf("expected gh auth setup-git in sprite, got: %s", log)
+	}
+	if !strings.Contains(log, "GH_TOKEN="+token) {
+		t.Fatalf("expected GH_TOKEN to be passed into sprite, got: %s", log)
+	}
+}
+
 func TestNormalizeSpriteName(t *testing.T) {
 	cases := []struct {
 		in   string
