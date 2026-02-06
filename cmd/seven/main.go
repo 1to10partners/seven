@@ -642,10 +642,19 @@ func ensureGhAuthInSprite(spriteName, ghToken string, opts upOptions) error {
 	if err := spriteExec(spriteName, env, opts.QuietExternal, "sh", "-lc", "command -v gh >/dev/null 2>&1"); err != nil {
 		return fmt.Errorf("gh not found in sprite: %w", err)
 	}
-	if err := spriteExec(spriteName, env, opts.QuietExternal, "sh", "-lc", "printf '%s' \"$GH_TOKEN\" | gh auth login --with-token"); err != nil {
+	loginCmd := "token=\"$GH_TOKEN\"; unset GH_TOKEN; printf '%s' \"$token\" | gh auth login --with-token -h github.com"
+	if out, err := spriteExecOutput(spriteName, env, "sh", "-lc", loginCmd); err != nil {
+		msg := strings.TrimSpace(out)
+		if msg != "" {
+			return fmt.Errorf("gh auth login failed: %w (%s)", err, msg)
+		}
 		return fmt.Errorf("gh auth login failed: %w", err)
 	}
-	if err := spriteExec(spriteName, env, opts.QuietExternal, "gh", "auth", "setup-git"); err != nil {
+	if out, err := spriteExecOutput(spriteName, env, "gh", "auth", "setup-git"); err != nil {
+		msg := strings.TrimSpace(out)
+		if msg != "" {
+			return fmt.Errorf("gh auth setup-git failed: %w (%s)", err, msg)
+		}
 		return fmt.Errorf("gh auth setup-git failed: %w", err)
 	}
 	return nil
@@ -727,6 +736,18 @@ func spriteExec(spriteName string, env []string, quiet bool, args ...string) err
 		return err
 	}
 	return runCmd(spriteBin(), nil, cmdArgs...)
+}
+
+func spriteExecOutput(spriteName string, env []string, args ...string) (string, error) {
+	if spriteName == "" {
+		return "", errors.New("sprite name is empty")
+	}
+	cmdArgs := []string{"exec", "-s", spriteName}
+	for _, kv := range env {
+		cmdArgs = append(cmdArgs, "-env", kv)
+	}
+	cmdArgs = append(cmdArgs, args...)
+	return runCmdOutput(spriteBin(), nil, cmdArgs...)
 }
 
 func spriteBin() string {

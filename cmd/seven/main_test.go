@@ -295,7 +295,7 @@ exit 0
 		t.Fatalf("expected sprite log: %v", err)
 	}
 	log := string(logData)
-	if !strings.Contains(log, "gh auth login --with-token") {
+	if !strings.Contains(log, "gh auth login --with-token -h github.com") {
 		t.Fatalf("expected gh auth login in sprite, got: %s", log)
 	}
 	if !strings.Contains(log, "gh auth setup-git") {

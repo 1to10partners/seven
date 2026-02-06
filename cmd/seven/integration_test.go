@@ -162,6 +162,67 @@ func TestIntegrationInitNormalizesForbiddenDirName(t *testing.T) {
 	}
 }
 
+func TestIntegrationGhAuthPersistsInSprite(t *testing.T) {
+	if os.Getenv("SEVEN_INTEGRATION") != "1" {
+		t.Skip("set SEVEN_INTEGRATION=1 to run integration tests")
+	}
+
+	if _, err := exec.LookPath("sprite"); err != nil {
+		t.Skip("sprite CLI not found in PATH")
+	}
+	if err := exec.Command("sprite", "list").Run(); err != nil {
+		t.Skip("sprite list failed; ensure you are logged in")
+	}
+	if _, err := exec.LookPath("gh"); err != nil {
+		t.Skip("gh CLI not found in PATH")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	tokenOut, err := exec.Command("gh", "auth", "token").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(tokenOut)) == "" {
+		t.Skip("gh auth token not available on host")
+	}
+
+	repo := t.TempDir()
+	if err := initGitRepo(repo, "https://github.com/1to10partners/seven.git"); err != nil {
+		t.Fatalf("git setup failed: %v", err)
+	}
+
+	cmdInit := exec.Command(testSevenBin, "init", "--assume-logged-in")
+	cmdInit.Dir = repo
+	cmdInit.Stdout = os.Stdout
+	cmdInit.Stderr = os.Stderr
+	cmdInit.Env = os.Environ()
+	if err := cmdInit.Run(); err != nil {
+		t.Fatalf("seven init failed: %v", err)
+	}
+
+	spriteFile := filepath.Join(repo, ".sprite")
+	data, err := os.ReadFile(spriteFile)
+	if err != nil {
+		t.Fatalf("expected .sprite file: %v", err)
+	}
+	name := strings.TrimSpace(string(data))
+	if name == "" {
+		t.Fatalf(".sprite should contain a name")
+	}
+
+	defer destroySprite(t, repo)
+
+	if err := exec.Command("sprite", "exec", "-s", name, "gh", "--version").Run(); err != nil {
+		t.Skip("gh not available in sprite")
+	}
+
+	auth := exec.Command("sprite", "exec", "-s", name, "gh", "auth", "status", "-h", "github.com")
+	auth.Stdout = os.Stdout
+	auth.Stderr = os.Stderr
+	if err := auth.Run(); err != nil {
+		t.Fatalf("expected gh auth status to succeed in sprite: %v", err)
+	}
+}
+
 func spriteListed(name string) bool {
 	out, err := exec.Command("sprite", "list").CombinedOutput()
 	if err != nil {
