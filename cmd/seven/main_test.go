@@ -260,6 +260,40 @@ func TestSevenDestroy(t *testing.T) {
 	}
 }
 
+func TestSevenDestroyKeepsSpriteFileOnDestroyFailure(t *testing.T) {
+	repo := t.TempDir()
+	state, _, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	spriteName := "destroy-fails"
+	if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte(spriteName+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .sprite: %v", err)
+	}
+	if err := os.WriteFile(state, []byte(spriteName+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write state: %v", err)
+	}
+
+	cmd := exec.Command(testSevenBin, "destroy")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_FAIL_DESTROY=1",
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected seven destroy to fail\n%s", output)
+	}
+
+	data, readErr := os.ReadFile(filepath.Join(repo, ".sprite"))
+	if readErr != nil {
+		t.Fatalf("expected .sprite to remain after destroy failure: %v", readErr)
+	}
+	if strings.TrimSpace(string(data)) != spriteName {
+		t.Fatalf("expected .sprite to keep sprite name %q, got %q", spriteName, strings.TrimSpace(string(data)))
+	}
+}
+
 func TestSevenInitConfiguresGhAuthInSprite(t *testing.T) {
 	repo := createTempRepo(t)
 	state, logPath, cleanup := createFakeSprite(t)
@@ -321,6 +355,35 @@ func TestNormalizeSpriteName(t *testing.T) {
 	for _, tc := range cases {
 		if got := normalizeSpriteName(tc.in); got != tc.want {
 			t.Fatalf("normalizeSpriteName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestSpriteListedInOutput(t *testing.T) {
+	out := "NAME STATUS\nfoo-bar-baz running\n"
+	if spriteListedInOutput(out, "foo-bar") {
+		t.Fatalf("did not expect partial sprite name match")
+	}
+	if !spriteListedInOutput(out, "foo-bar-baz") {
+		t.Fatalf("expected exact sprite name match")
+	}
+}
+
+func TestGithubRepoSlug(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{in: "git@github.com:octo/hello.git", want: "octo/hello"},
+		{in: "https://github.com/octo/hello.git", want: "octo/hello"},
+		{in: "ssh://git@github.com/octo/hello.git", want: "octo/hello"},
+		{in: "ssh://git@github.com/octo/hello/extra.git", want: ""},
+		{in: "https://gitlab.com/octo/hello.git", want: ""},
+	}
+
+	for _, tc := range cases {
+		if got := githubRepoSlug(tc.in); got != tc.want {
+			t.Fatalf("githubRepoSlug(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }
@@ -465,6 +528,10 @@ case "$cmd" in
       shift
     fi
     name="$1"
+    if [ "${SPRITE_FAIL_DESTROY:-}" = "1" ]; then
+      logit "destroy $name (fail)"
+      exit 1
+    fi
     logit "destroy $name"
     if [ -f "$state" ]; then
       grep -v "^$name$" "$state" > "$state.tmp" || true

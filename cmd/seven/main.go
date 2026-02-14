@@ -38,6 +38,7 @@ type spriteNameInfo struct {
 
 var spritePath string
 var spriteNamePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+var githubSlugPartPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
 func main() {
 	if len(os.Args) < 2 {
@@ -170,11 +171,6 @@ func cmdDestroy(args []string) {
 		os.Exit(1)
 	}
 
-	if err := removeSpriteFile(); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to remove .sprite: %v\n", err)
-		os.Exit(1)
-	}
-
 	exists, err := spriteExists(name)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sprite list failed: %v\n", err)
@@ -185,8 +181,17 @@ func cmdDestroy(args []string) {
 			fmt.Fprintf(os.Stderr, "sprite destroy failed: %v\n", err)
 			os.Exit(1)
 		}
+		if err := removeSpriteFile(); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to remove .sprite: %v\n", err)
+			os.Exit(1)
+		}
 		fmt.Printf("destroyed sprite: %s\n", name)
 		return
+	}
+
+	if err := removeSpriteFile(); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to remove .sprite: %v\n", err)
+		os.Exit(1)
 	}
 
 	fmt.Printf("sprite not found: %s\n", name)
@@ -571,8 +576,26 @@ func spriteExists(name string) (bool, error) {
 	if name == "" {
 		return false, nil
 	}
-	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
-	return re.MatchString(out), nil
+	return spriteListedInOutput(out, name), nil
+}
+
+func spriteListedInOutput(out, name string) bool {
+	scanner := bufio.NewScanner(strings.NewReader(out))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		if line == name {
+			return true
+		}
+		for _, field := range strings.Fields(line) {
+			if field == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func detectRepoInfo(spriteName string, opts upOptions) (string, string, string, error) {
@@ -704,21 +727,32 @@ func hasOriginRemote(remotes string) bool {
 }
 
 func githubRepoSlug(repoURL string) string {
-	slug := repoURL
+	slug := strings.TrimSpace(repoURL)
 	if strings.HasPrefix(slug, "git@github.com:") {
 		slug = strings.TrimPrefix(slug, "git@github.com:")
 	} else if strings.HasPrefix(slug, "https://github.com/") {
 		slug = strings.TrimPrefix(slug, "https://github.com/")
 	} else if strings.HasPrefix(slug, "http://github.com/") {
 		slug = strings.TrimPrefix(slug, "http://github.com/")
+	} else if strings.HasPrefix(slug, "ssh://git@github.com/") {
+		slug = strings.TrimPrefix(slug, "ssh://git@github.com/")
+	} else {
+		return ""
 	}
+
+	slug = strings.TrimPrefix(slug, "/")
+	slug = strings.TrimSuffix(slug, "/")
 	if strings.HasSuffix(slug, ".git") {
 		slug = strings.TrimSuffix(slug, ".git")
 	}
-	if strings.Contains(slug, "/") {
-		return slug
+	parts := strings.Split(slug, "/")
+	if len(parts) != 2 {
+		return ""
 	}
-	return ""
+	if !githubSlugPartPattern.MatchString(parts[0]) || !githubSlugPartPattern.MatchString(parts[1]) {
+		return ""
+	}
+	return parts[0] + "/" + parts[1]
 }
 
 func spriteExec(spriteName string, env []string, quiet bool, args ...string) error {

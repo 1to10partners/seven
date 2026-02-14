@@ -44,7 +44,7 @@ cd /path/to/your/repo
 seven up
 ```
 
-On first run, `seven up` will prompt you to log in to fly.io, then create the sprite, and finally clone your repo and handle basic git setup. Subsequent runs skip `init` and are therefore instant.
+On first run, `seven up` will prompt you to run `sprite login`, then create the sprite, and finally clone your repo and handle basic git setup. Subsequent runs skip `init` and are therefore instant.
 
 Once inside the sprite, cd into your folder and start your favorite assistant. The following come pre-installed: `claude`, `codex`, `cursor-agent`, and `gemini-cli`.
 
