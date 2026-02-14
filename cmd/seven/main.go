@@ -39,6 +39,8 @@ type spriteNameInfo struct {
 var spritePath string
 var spriteNamePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 var githubSlugPartPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+var spriteLatestVersionPattern = regexp.MustCompile(`(?m)^Latest version:\s*(\S+)\s*$`)
+var spriteCurrentVersionPattern = regexp.MustCompile(`(?m)^Current version:\s*(\S+)\s*$`)
 
 func main() {
 	if len(os.Args) < 2 {
@@ -243,6 +245,7 @@ func runUp(opts upOptions) (upResult, error) {
 	if err := ensureSpriteCLI(); err != nil {
 		return upResult{}, err
 	}
+	maybeUpgradeSpriteCLI(opts)
 
 	info, err := resolveSpriteName()
 	if err != nil {
@@ -566,6 +569,46 @@ func ensureSpriteCLI() error {
 	}
 
 	return errors.New("sprite CLI not found after install; ensure ~/.local/bin is on PATH")
+}
+
+func maybeUpgradeSpriteCLI(opts upOptions) {
+	opts.Logger("[seven up] checking sprite CLI updates")
+	out, err := runCmdOutput(spriteBin(), nil, "upgrade", "--check")
+	if err != nil {
+		opts.Logger(fmt.Sprintf("[seven up] sprite upgrade check failed: %v", err))
+		return
+	}
+
+	latest, current, ok := parseSpriteUpgradeCheckOutput(out)
+	if !ok {
+		opts.Logger("[seven up] could not parse sprite upgrade check output; skipping auto-upgrade")
+		return
+	}
+	if latest == current {
+		opts.Logger(fmt.Sprintf("[seven up] sprite CLI is up to date (%s)", current))
+		return
+	}
+
+	opts.Logger(fmt.Sprintf("[seven up] upgrading sprite CLI from %s to %s", current, latest))
+	if err := runCmd(spriteBin(), nil, "upgrade"); err != nil {
+		opts.Logger(fmt.Sprintf("[seven up] sprite CLI upgrade failed: %v", err))
+		return
+	}
+
+	if err := ensureSpriteCLI(); err != nil {
+		opts.Logger(fmt.Sprintf("[seven up] sprite CLI upgraded but refresh failed: %v", err))
+		return
+	}
+	opts.Logger(fmt.Sprintf("[seven up] sprite CLI upgraded to %s", latest))
+}
+
+func parseSpriteUpgradeCheckOutput(out string) (latest, current string, ok bool) {
+	latestMatch := spriteLatestVersionPattern.FindStringSubmatch(out)
+	currentMatch := spriteCurrentVersionPattern.FindStringSubmatch(out)
+	if len(latestMatch) < 2 || len(currentMatch) < 2 {
+		return "", "", false
+	}
+	return strings.TrimSpace(latestMatch[1]), strings.TrimSpace(currentMatch[1]), true
 }
 
 func spriteList() (string, error) {

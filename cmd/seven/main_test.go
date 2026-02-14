@@ -152,6 +152,38 @@ func TestSevenUpLogsInWhenSpriteListFails(t *testing.T) {
 	}
 }
 
+func TestSevenUpAutoUpgradesSpriteCLIWhenOutdated(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-console", "--no-tui")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		"SPRITE_UPGRADE_CHECK_LATEST=v0.0.2",
+		"SPRITE_UPGRADE_CHECK_CURRENT=v0.0.1",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven up failed: %v\n%s", err, output)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "upgrade --check") {
+		t.Fatalf("expected upgrade check log, got: %s", log)
+	}
+	if strings.Count(log, "upgrade ") < 2 {
+		t.Fatalf("expected upgrade execution log after check, got: %s", log)
+	}
+}
+
 func TestSevenInitSetsUpSpriteWithoutConsole(t *testing.T) {
 	repo := createTempRepo(t)
 	state, logPath, cleanup := createFakeSprite(t)
@@ -439,6 +471,23 @@ func TestGithubRepoSlug(t *testing.T) {
 	}
 }
 
+func TestParseSpriteUpgradeCheckOutput(t *testing.T) {
+	out := "Checking for updates...\nLatest version: v0.0.2\nCurrent version: v0.0.1\n"
+	latest, current, ok := parseSpriteUpgradeCheckOutput(out)
+	if !ok {
+		t.Fatalf("expected parseSpriteUpgradeCheckOutput to succeed")
+	}
+	if latest != "v0.0.2" || current != "v0.0.1" {
+		t.Fatalf("unexpected parse result latest=%q current=%q", latest, current)
+	}
+}
+
+func TestParseSpriteUpgradeCheckOutputInvalid(t *testing.T) {
+	if _, _, ok := parseSpriteUpgradeCheckOutput("no version lines"); ok {
+		t.Fatalf("expected parseSpriteUpgradeCheckOutput to fail")
+	}
+}
+
 func TestResolveSpriteNameNormalizesDirName(t *testing.T) {
 	parent := t.TempDir()
 	repo := filepath.Join(parent, "trems.al")
@@ -596,6 +645,18 @@ case "$cmd" in
     ;;
   exec)
     logit "exec $*"
+    exit 0
+    ;;
+  upgrade)
+    if [ "$1" = "--check" ]; then
+      logit "upgrade --check"
+      latest="${SPRITE_UPGRADE_CHECK_LATEST:-v0.0.1}"
+      current="${SPRITE_UPGRADE_CHECK_CURRENT:-$latest}"
+      echo "Latest version: $latest"
+      echo "Current version: $current"
+      exit 0
+    fi
+    logit "upgrade $*"
     exit 0
     ;;
   *)
