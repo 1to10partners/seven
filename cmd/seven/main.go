@@ -42,6 +42,12 @@ var githubSlugPartPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 var spriteLatestVersionPattern = regexp.MustCompile(`(?m)^Latest version:\s*(\S+)\s*$`)
 var spriteCurrentVersionPattern = regexp.MustCompile(`(?m)^Current version:\s*(\S+)\s*$`)
 
+const (
+	sevenConsoleHookPath   = "$HOME/.seven-console-hook.sh"
+	sevenConsoleMarkerPath = "$HOME/.seven-console-once"
+	sevenDefaultAssistant  = "codex"
+)
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -383,12 +389,18 @@ func runInit(opts upOptions) (upResult, error) {
 				return upResult{}, err
 			}
 		}
+		if err := configureConsoleBootstrapInSprite(name, name, sevenDefaultAssistant, opts); err != nil {
+			opts.Logger(fmt.Sprintf("[seven init] console bootstrap setup failed: %v", err))
+		}
 		return upResult{Name: name, OpenConsole: false, SpriteExists: false}, nil
 	}
 
 	opts.Logger(fmt.Sprintf("[seven init] cloning via git clone: %s", repoURL))
 	if err := spriteExec(name, nil, opts.QuietExternal, "git", "clone", repoURL, name); err != nil {
 		return upResult{}, err
+	}
+	if err := configureConsoleBootstrapInSprite(name, name, sevenDefaultAssistant, opts); err != nil {
+		opts.Logger(fmt.Sprintf("[seven init] console bootstrap setup failed: %v", err))
 	}
 
 	return upResult{Name: name, OpenConsole: false, SpriteExists: false}, nil
@@ -609,6 +621,56 @@ func parseSpriteUpgradeCheckOutput(out string) (latest, current string, ok bool)
 		return "", "", false
 	}
 	return strings.TrimSpace(latestMatch[1]), strings.TrimSpace(currentMatch[1]), true
+}
+
+func configureConsoleBootstrapInSprite(spriteName, repoDir, assistant string, opts upOptions) error {
+	if repoDir == "" || assistant == "" {
+		return nil
+	}
+
+	opts.Logger(fmt.Sprintf("[seven init] configuring first console launch: cd %s && %s", repoDir, assistant))
+	env := []string{"SEVEN_REPO_DIR=" + repoDir + ",SEVEN_ASSISTANT=" + assistant}
+	cmd := `set -e
+cat > "` + sevenConsoleHookPath + `" <<'EOF'
+# seven one-shot console bootstrap
+case "$-" in
+  *i*) ;;
+  *) return 0 ;;
+esac
+
+if [ -n "${SEVEN_CONSOLE_BOOTSTRAP_RUNNING:-}" ]; then
+  return 0
+fi
+
+marker="` + sevenConsoleMarkerPath + `"
+if [ ! -f "$marker" ]; then
+  return 0
+fi
+
+repo_path="$(sed -n '1p' "$marker")"
+assistant_cmd="$(sed -n '2p' "$marker")"
+rm -f "$marker"
+
+if [ -n "$repo_path" ] && [ -d "$repo_path" ]; then
+  cd "$repo_path" || true
+fi
+
+if [ -n "$assistant_cmd" ] && command -v "$assistant_cmd" >/dev/null 2>&1; then
+  export SEVEN_CONSOLE_BOOTSTRAP_RUNNING=1
+  exec "$assistant_cmd"
+fi
+EOF
+chmod 600 "` + sevenConsoleHookPath + `"
+
+for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+  touch "$rc"
+  grep -Fqx '[ -f "` + sevenConsoleHookPath + `" ] && . "` + sevenConsoleHookPath + `"' "$rc" || printf '\n%s\n' '[ -f "` + sevenConsoleHookPath + `" ] && . "` + sevenConsoleHookPath + `"' >> "$rc"
+done
+
+printf '%s\n%s\n' "$HOME/$SEVEN_REPO_DIR" "$SEVEN_ASSISTANT" > "` + sevenConsoleMarkerPath + `"
+chmod 600 "` + sevenConsoleMarkerPath + `"
+`
+	return spriteExec(spriteName, env, opts.QuietExternal, "sh", "-lc", cmd)
 }
 
 func spriteList() (string, error) {

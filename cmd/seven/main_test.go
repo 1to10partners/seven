@@ -222,6 +222,15 @@ func TestSevenInitSetsUpSpriteWithoutConsole(t *testing.T) {
 	if !strings.Contains(log, "gh repo clone") {
 		t.Fatalf("expected clone exec log, got: %s", log)
 	}
+	if !strings.Contains(log, ".seven-console-hook.sh") {
+		t.Fatalf("expected console hook setup in sprite, got: %s", log)
+	}
+	if !strings.Contains(log, ".seven-console-once") {
+		t.Fatalf("expected one-shot marker setup in sprite, got: %s", log)
+	}
+	if !strings.Contains(log, ".bashrc") || !strings.Contains(log, ".zshrc") {
+		t.Fatalf("expected shell rc setup for bash and zsh, got: %s", log)
+	}
 	if strings.Contains(log, "console -s "+name) {
 		t.Fatalf("did not expect console log, got: %s", log)
 	}

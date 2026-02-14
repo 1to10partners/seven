@@ -112,6 +112,49 @@ func TestIntegrationInitWithGitRemote(t *testing.T) {
 		t.Fatalf("expected repo directory in sprite: %v", err)
 	}
 
+	hookCheck := exec.Command("sprite", "exec", "-s", name, "sh", "-lc", "test -f \"$HOME/.seven-console-hook.sh\"")
+	hookCheck.Stdout = os.Stdout
+	hookCheck.Stderr = os.Stderr
+	if err := hookCheck.Run(); err != nil {
+		_ = exec.Command("sprite", "destroy", "--force", name).Run()
+		t.Fatalf("expected console hook file in sprite: %v", err)
+	}
+
+	bashRcCheck := exec.Command("sprite", "exec", "-s", name, "sh", "-lc", "grep -Fq '[ -f \"$HOME/.seven-console-hook.sh\" ] && . \"$HOME/.seven-console-hook.sh\"' \"$HOME/.bashrc\"")
+	bashRcCheck.Stdout = os.Stdout
+	bashRcCheck.Stderr = os.Stderr
+	if err := bashRcCheck.Run(); err != nil {
+		_ = exec.Command("sprite", "destroy", "--force", name).Run()
+		t.Fatalf("expected console hook source line in .bashrc: %v", err)
+	}
+
+	zshRcCheck := exec.Command("sprite", "exec", "-s", name, "sh", "-lc", "grep -Fq '[ -f \"$HOME/.seven-console-hook.sh\" ] && . \"$HOME/.seven-console-hook.sh\"' \"$HOME/.zshrc\"")
+	zshRcCheck.Stdout = os.Stdout
+	zshRcCheck.Stderr = os.Stderr
+	if err := zshRcCheck.Run(); err != nil {
+		_ = exec.Command("sprite", "destroy", "--force", name).Run()
+		t.Fatalf("expected console hook source line in .zshrc: %v", err)
+	}
+
+	markerOut, err := exec.Command("sprite", "exec", "-s", name, "sh", "-lc", "cat \"$HOME/.seven-console-once\"").CombinedOutput()
+	if err != nil {
+		_ = exec.Command("sprite", "destroy", "--force", name).Run()
+		t.Fatalf("expected one-shot marker file in sprite: %v\n%s", err, markerOut)
+	}
+	markerLines := strings.Split(strings.TrimSpace(string(markerOut)), "\n")
+	if len(markerLines) < 2 {
+		_ = exec.Command("sprite", "destroy", "--force", name).Run()
+		t.Fatalf("expected marker to have repo path and assistant, got: %q", markerOut)
+	}
+	if !strings.HasSuffix(markerLines[0], "/"+name) {
+		_ = exec.Command("sprite", "destroy", "--force", name).Run()
+		t.Fatalf("expected marker repo path to end with /%s, got: %q", name, markerLines[0])
+	}
+	if markerLines[1] != "codex" {
+		_ = exec.Command("sprite", "destroy", "--force", name).Run()
+		t.Fatalf("expected marker assistant to be codex, got: %q", markerLines[1])
+	}
+
 	destroySprite(t, repo)
 }
 
