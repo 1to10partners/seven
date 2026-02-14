@@ -184,6 +184,36 @@ func TestSevenUpAutoUpgradesSpriteCLIWhenOutdated(t *testing.T) {
 	}
 }
 
+func TestSevenUpAutoUpgradesSpriteCLIWithNonInteractiveConfirmation(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-console", "--no-tui")
+	cmd.Dir = repo
+	cmd.Stdin = strings.NewReader("")
+	cmd.Env = append(os.Environ(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		"SPRITE_UPGRADE_CHECK_LATEST=v0.0.2",
+		"SPRITE_UPGRADE_CHECK_CURRENT=v0.0.1",
+		"SPRITE_UPGRADE_CONFIRM_REQUIRED=1",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven up failed: %v\n%s", err, output)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	if strings.Contains(string(logData), "upgrade (confirm failed)") {
+		t.Fatalf("expected upgrade confirmation to be provided, got: %s", logData)
+	}
+}
+
 func TestSevenInitSetsUpSpriteWithoutConsole(t *testing.T) {
 	repo := createTempRepo(t)
 	state, logPath, cleanup := createFakeSprite(t)
@@ -227,6 +257,12 @@ func TestSevenInitSetsUpSpriteWithoutConsole(t *testing.T) {
 	}
 	if !strings.Contains(log, ".seven-console-once") {
 		t.Fatalf("expected one-shot marker setup in sprite, got: %s", log)
+	}
+	if !strings.Contains(log, "-env SEVEN_REPO_DIR="+name+",SEVEN_ASSISTANT=codex") {
+		t.Fatalf("expected env vars to be comma-joined for sprite exec, got: %s", log)
+	}
+	if !strings.Contains(log, "exec \"$assistant_cmd\"") {
+		t.Fatalf("expected assistant command to execute directly, got: %s", log)
 	}
 	if !strings.Contains(log, ".bashrc") || !strings.Contains(log, ".zshrc") {
 		t.Fatalf("expected shell rc setup for bash and zsh, got: %s", log)
@@ -429,6 +465,45 @@ exit 0
 	wantFileSpec := "-file " + authPath + ":/tmp/host-codex-auth.json"
 	if !strings.Contains(log, wantFileSpec) {
 		t.Fatalf("expected codex auth file upload in sprite exec, got: %s", log)
+	}
+}
+
+func TestSevenInitSyncsCodexConfigInSprite(t *testing.T) {
+	repo := t.TempDir()
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	fakeHome := t.TempDir()
+	codexDir := filepath.Join(fakeHome, ".codex")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatalf("failed to create fake codex dir: %v", err)
+	}
+	configPath := filepath.Join(codexDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("approval_policy = \"never\"\nsandbox_mode = \"danger-full-access\"\n"), 0o600); err != nil {
+		t.Fatalf("failed to write fake codex config file: %v", err)
+	}
+
+	cmd := exec.Command(testSevenBin, "init", "--assume-logged-in")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"HOME="+fakeHome,
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven init failed: %v\n%s", err, output)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	log := string(logData)
+	wantFileSpec := "-file " + configPath + ":/tmp/host-codex-config.toml"
+	if !strings.Contains(log, wantFileSpec) {
+		t.Fatalf("expected codex config file upload in sprite exec, got: %s", log)
 	}
 }
 
@@ -664,6 +739,18 @@ case "$cmd" in
       echo "Latest version: $latest"
       echo "Current version: $current"
       exit 0
+    fi
+    if [ "${SPRITE_UPGRADE_CONFIRM_REQUIRED:-}" = "1" ]; then
+      answer=""
+      IFS= read -r answer || answer=""
+      case "$answer" in
+        y|Y|yes|YES|Yes)
+          ;;
+        *)
+          logit "upgrade (confirm failed)"
+          exit 1
+          ;;
+      esac
     fi
     logit "upgrade $*"
     exit 0

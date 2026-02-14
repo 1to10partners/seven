@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -156,6 +157,97 @@ func TestIntegrationInitWithGitRemote(t *testing.T) {
 	}
 
 	destroySprite(t, repo)
+}
+
+func TestIntegrationConsoleBootstrapRunsCodexInRepo(t *testing.T) {
+	if os.Getenv("SEVEN_INTEGRATION") != "1" {
+		t.Skip("set SEVEN_INTEGRATION=1 to run integration tests")
+	}
+
+	if _, err := exec.LookPath("sprite"); err != nil {
+		t.Skip("sprite CLI not found in PATH")
+	}
+	if err := exec.Command("sprite", "list").Run(); err != nil {
+		t.Skip("sprite list failed; ensure you are logged in")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := t.TempDir()
+	if err := initGitRepo(repo, "https://github.com/1to10partners/seven.git"); err != nil {
+		t.Fatalf("git setup failed: %v", err)
+	}
+
+	name := uniqueSpriteName()
+	if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte(name+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .sprite: %v", err)
+	}
+
+	cmdInit := exec.Command(testSevenBin, "init", "--assume-logged-in")
+	cmdInit.Dir = repo
+	cmdInit.Stdout = os.Stdout
+	cmdInit.Stderr = os.Stderr
+	cmdInit.Env = os.Environ()
+	if err := cmdInit.Run(); err != nil {
+		t.Fatalf("seven init failed: %v", err)
+	}
+
+	defer destroySprite(t, repo)
+
+	setupStub := exec.Command("sprite", "exec", "-s", name, "sh", "-lc", `set -e
+install -d "$HOME/.seven-test-bin"
+cat > "$HOME/.seven-test-bin/codex" <<'EOF'
+#!/bin/sh
+pwd > "$HOME/.seven-codex-cwd"
+exit 0
+EOF
+chmod +x "$HOME/.seven-test-bin/codex"
+rm -f "$HOME/.seven-codex-cwd"
+for rc in "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.zprofile"; do
+  tmp="$rc.tmp.$$"
+  {
+    printf '%s\n' 'export PATH="$HOME/.seven-test-bin:$PATH"'
+    cat "$rc"
+  } > "$tmp"
+  mv "$tmp" "$rc"
+done
+`)
+	setupStub.Stdout = os.Stdout
+	setupStub.Stderr = os.Stderr
+	if err := setupStub.Run(); err != nil {
+		t.Fatalf("failed to set up codex stub in sprite: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	console := exec.CommandContext(ctx, "sprite", "console", "-s", name)
+	console.Stdout = os.Stdout
+	console.Stderr = os.Stderr
+	console.Env = append(os.Environ(), "SHELL=/bin/bash")
+	if err := console.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			t.Fatalf("sprite console timed out waiting for bootstrap codex to execute")
+		}
+		t.Fatalf("sprite console failed: %v", err)
+	}
+
+	cwdOut, err := exec.Command("sprite", "exec", "-s", name, "sh", "-lc", "cat \"$HOME/.seven-codex-cwd\"").CombinedOutput()
+	if err != nil {
+		t.Fatalf("expected codex stub to write cwd file: %v\n%s", err, cwdOut)
+	}
+	cwd := strings.TrimSpace(string(cwdOut))
+	if !strings.HasSuffix(cwd, "/"+name) {
+		t.Fatalf("expected codex to run from repo dir /%s, got: %q", name, cwd)
+	}
+
+	markerCheck := exec.Command("sprite", "exec", "-s", name, "sh", "-lc", "test ! -f \"$HOME/.seven-console-once\"")
+	markerCheck.Stdout = os.Stdout
+	markerCheck.Stderr = os.Stderr
+	if err := markerCheck.Run(); err != nil {
+		t.Fatalf("expected one-shot marker to be consumed after first console: %v", err)
+	}
 }
 
 func TestIntegrationInitNormalizesForbiddenDirName(t *testing.T) {

@@ -282,6 +282,17 @@ func runUp(opts upOptions) (upResult, error) {
 				return upResult{}, err
 			}
 		}
+		if err := syncGitIdentity(name, opts); err != nil {
+			return upResult{}, err
+		}
+		codexConfigPath := detectHostCodexConfig(opts)
+		if err := ensureCodexConfigInSprite(name, codexConfigPath, opts); err != nil {
+			opts.Logger(fmt.Sprintf("[seven up] codex config setup failed: %v", err))
+		}
+		codexAuthPath := detectHostCodexChatGPTAuth(opts)
+		if err := ensureCodexAuthInSprite(name, codexAuthPath, opts); err != nil {
+			opts.Logger(fmt.Sprintf("[seven up] codex auth setup failed: %v", err))
+		}
 		return upResult{Name: name, OpenConsole: opts.OpenConsole, SpriteExists: true}, nil
 	}
 
@@ -335,6 +346,10 @@ func runInit(opts upOptions) (upResult, error) {
 		if err := syncGitIdentity(name, opts); err != nil {
 			return upResult{}, err
 		}
+		codexConfigPath := detectHostCodexConfig(opts)
+		if err := ensureCodexConfigInSprite(name, codexConfigPath, opts); err != nil {
+			opts.Logger(fmt.Sprintf("[seven init] codex config setup failed: %v", err))
+		}
 		codexAuthPath := detectHostCodexChatGPTAuth(opts)
 		if err := ensureCodexAuthInSprite(name, codexAuthPath, opts); err != nil {
 			opts.Logger(fmt.Sprintf("[seven init] codex auth setup failed: %v", err))
@@ -366,6 +381,10 @@ func runInit(opts upOptions) (upResult, error) {
 	}
 	if err := ensureGhAuthInSprite(name, ghToken, opts); err != nil {
 		opts.Logger(fmt.Sprintf("[seven init] gh auth setup failed: %v", err))
+	}
+	codexConfigPath := detectHostCodexConfig(opts)
+	if err := ensureCodexConfigInSprite(name, codexConfigPath, opts); err != nil {
+		opts.Logger(fmt.Sprintf("[seven init] codex config setup failed: %v", err))
 	}
 	codexAuthPath := detectHostCodexChatGPTAuth(opts)
 	if err := ensureCodexAuthInSprite(name, codexAuthPath, opts); err != nil {
@@ -602,7 +621,7 @@ func maybeUpgradeSpriteCLI(opts upOptions) {
 	}
 
 	opts.Logger(fmt.Sprintf("[seven up] upgrading sprite CLI from %s to %s", current, latest))
-	if err := runCmd(spriteBin(), nil, "upgrade"); err != nil {
+	if err := runCmdWithInput(spriteBin(), nil, "y\n", "upgrade"); err != nil {
 		opts.Logger(fmt.Sprintf("[seven up] sprite CLI upgrade failed: %v", err))
 		return
 	}
@@ -662,7 +681,7 @@ fi
 EOF
 chmod 600 "` + sevenConsoleHookPath + `"
 
-for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+for rc in "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.zprofile"; do
   touch "$rc"
   grep -Fqx '[ -f "` + sevenConsoleHookPath + `" ] && . "` + sevenConsoleHookPath + `"' "$rc" || printf '\n%s\n' '[ -f "` + sevenConsoleHookPath + `" ] && . "` + sevenConsoleHookPath + `"' >> "$rc"
 done
@@ -823,6 +842,45 @@ func detectHostCodexChatGPTAuth(opts upOptions) string {
 	return authPath
 }
 
+func detectHostCodexConfig(opts upOptions) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	configPath := filepath.Join(home, ".codex", "config.toml")
+	info, err := os.Stat(configPath)
+	if err != nil || info.IsDir() || info.Size() == 0 {
+		return ""
+	}
+
+	opts.Logger("[seven init] detected host codex config")
+	return configPath
+}
+
+func ensureCodexConfigInSprite(spriteName, hostConfigPath string, opts upOptions) error {
+	if hostConfigPath == "" {
+		return nil
+	}
+	if err := spriteExec(spriteName, nil, opts.QuietExternal, "sh", "-lc", "command -v codex >/dev/null 2>&1"); err != nil {
+		opts.Logger("[seven init] codex not found in sprite, skipping codex config sync")
+		return nil
+	}
+
+	opts.Logger("[seven init] syncing codex config into sprite")
+	copySpec := hostConfigPath + ":/tmp/host-codex-config.toml"
+	cmdArgs := []string{
+		"exec",
+		"-s", spriteName,
+		"-file", copySpec,
+		"sh", "-lc", "install -d -m 700 \"$HOME/.codex\" && install -m 600 /tmp/host-codex-config.toml \"$HOME/.codex/config.toml\" && rm -f /tmp/host-codex-config.toml",
+	}
+	if opts.QuietExternal {
+		_, err := runCmdOutput(spriteBin(), nil, cmdArgs...)
+		return err
+	}
+	return runCmd(spriteBin(), nil, cmdArgs...)
+}
+
 func ensureCodexAuthInSprite(spriteName, hostAuthPath string, opts upOptions) error {
 	if hostAuthPath == "" {
 		return nil
@@ -971,6 +1029,17 @@ func runCmd(name string, extraEnv []string, args ...string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
+	return cmd.Run()
+}
+
+func runCmdWithInput(name string, extraEnv []string, stdin string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = strings.NewReader(stdin)
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)
 	}
