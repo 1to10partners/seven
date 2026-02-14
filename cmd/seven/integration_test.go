@@ -223,6 +223,65 @@ func TestIntegrationGhAuthPersistsInSprite(t *testing.T) {
 	}
 }
 
+func TestIntegrationCodexChatGPTAuthPersistsInSprite(t *testing.T) {
+	if os.Getenv("SEVEN_INTEGRATION") != "1" {
+		t.Skip("set SEVEN_INTEGRATION=1 to run integration tests")
+	}
+
+	if _, err := exec.LookPath("sprite"); err != nil {
+		t.Skip("sprite CLI not found in PATH")
+	}
+	if err := exec.Command("sprite", "list").Run(); err != nil {
+		t.Skip("sprite list failed; ensure you are logged in")
+	}
+	if _, err := exec.LookPath("codex"); err != nil {
+		t.Skip("codex CLI not found in PATH")
+	}
+
+	statusOut, err := exec.Command("codex", "login", "status").CombinedOutput()
+	if err != nil || !strings.Contains(string(statusOut), "Logged in using ChatGPT") {
+		t.Skip("host codex is not logged in using ChatGPT")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("could not resolve home directory")
+	}
+	hostAuthPath := filepath.Join(home, ".codex", "auth.json")
+	if _, err := os.Stat(hostAuthPath); err != nil {
+		t.Skip("host codex auth file not found")
+	}
+
+	repo := t.TempDir()
+	name := uniqueSpriteName()
+	if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte(name+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .sprite: %v", err)
+	}
+
+	cmdInit := exec.Command(testSevenBin, "init", "--assume-logged-in")
+	cmdInit.Dir = repo
+	cmdInit.Stdout = os.Stdout
+	cmdInit.Stderr = os.Stderr
+	cmdInit.Env = os.Environ()
+	if err := cmdInit.Run(); err != nil {
+		t.Fatalf("seven init failed: %v", err)
+	}
+
+	defer destroySprite(t, repo)
+
+	if err := exec.Command("sprite", "exec", "-s", name, "codex", "--version").Run(); err != nil {
+		t.Skip("codex not available in sprite")
+	}
+
+	status := exec.Command("sprite", "exec", "-s", name, "codex", "login", "status")
+	out, err := status.CombinedOutput()
+	if err != nil {
+		t.Fatalf("expected codex login status to succeed in sprite: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "Logged in using ChatGPT") {
+		t.Fatalf("expected codex ChatGPT auth in sprite, got: %s", out)
+	}
+}
+
 func spriteListed(name string) bool {
 	out, err := exec.Command("sprite", "list").CombinedOutput()
 	if err != nil {

@@ -326,6 +326,10 @@ func runInit(opts upOptions) (upResult, error) {
 		if err := syncGitIdentity(name, opts); err != nil {
 			return upResult{}, err
 		}
+		codexAuthPath := detectHostCodexChatGPTAuth(opts)
+		if err := ensureCodexAuthInSprite(name, codexAuthPath, opts); err != nil {
+			opts.Logger(fmt.Sprintf("[seven init] codex auth setup failed: %v", err))
+		}
 		return upResult{Name: name, OpenConsole: false, SpriteExists: true}, nil
 	}
 
@@ -353,6 +357,10 @@ func runInit(opts upOptions) (upResult, error) {
 	}
 	if err := ensureGhAuthInSprite(name, ghToken, opts); err != nil {
 		opts.Logger(fmt.Sprintf("[seven init] gh auth setup failed: %v", err))
+	}
+	codexAuthPath := detectHostCodexChatGPTAuth(opts)
+	if err := ensureCodexAuthInSprite(name, codexAuthPath, opts); err != nil {
+		opts.Logger(fmt.Sprintf("[seven init] codex auth setup failed: %v", err))
 	}
 
 	if repoURL == "" {
@@ -681,6 +689,57 @@ func ensureGhAuthInSprite(spriteName, ghToken string, opts upOptions) error {
 		return fmt.Errorf("gh auth setup-git failed: %w", err)
 	}
 	return nil
+}
+
+func detectHostCodexChatGPTAuth(opts upOptions) string {
+	if _, err := exec.LookPath("codex"); err != nil {
+		return ""
+	}
+
+	status, err := runCmdOutput("codex", nil, "login", "status")
+	if err != nil {
+		return ""
+	}
+	if !strings.Contains(status, "Logged in using ChatGPT") {
+		return ""
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	authPath := filepath.Join(home, ".codex", "auth.json")
+	info, err := os.Stat(authPath)
+	if err != nil || info.IsDir() || info.Size() == 0 {
+		return ""
+	}
+
+	opts.Logger("[seven init] detected host codex ChatGPT auth")
+	return authPath
+}
+
+func ensureCodexAuthInSprite(spriteName, hostAuthPath string, opts upOptions) error {
+	if hostAuthPath == "" {
+		return nil
+	}
+	if err := spriteExec(spriteName, nil, opts.QuietExternal, "sh", "-lc", "command -v codex >/dev/null 2>&1"); err != nil {
+		opts.Logger("[seven init] codex not found in sprite, skipping codex auth sync")
+		return nil
+	}
+
+	opts.Logger("[seven init] syncing codex auth into sprite")
+	copySpec := hostAuthPath + ":/tmp/host-codex-auth.json"
+	cmdArgs := []string{
+		"exec",
+		"-s", spriteName,
+		"-file", copySpec,
+		"sh", "-lc", "install -d -m 700 \"$HOME/.codex\" && install -m 600 /tmp/host-codex-auth.json \"$HOME/.codex/auth.json\" && rm -f /tmp/host-codex-auth.json",
+	}
+	if opts.QuietExternal {
+		_, err := runCmdOutput(spriteBin(), nil, cmdArgs...)
+		return err
+	}
+	return runCmd(spriteBin(), nil, cmdArgs...)
 }
 
 func syncGitIdentity(spriteName string, opts upOptions) error {

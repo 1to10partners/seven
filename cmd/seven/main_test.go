@@ -340,6 +340,57 @@ exit 0
 	}
 }
 
+func TestSevenInitSyncsCodexChatGPTAuthInSprite(t *testing.T) {
+	repo := t.TempDir()
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	fakeHome := t.TempDir()
+	codexDir := filepath.Join(fakeHome, ".codex")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatalf("failed to create fake codex dir: %v", err)
+	}
+	authPath := filepath.Join(codexDir, "auth.json")
+	if err := os.WriteFile(authPath, []byte(`{"provider":"chatgpt"}`), 0o600); err != nil {
+		t.Fatalf("failed to write fake codex auth file: %v", err)
+	}
+
+	codexBin := t.TempDir()
+	codexScript := `#!/bin/sh
+if [ "$1" = "login" ] && [ "$2" = "status" ]; then
+  echo "Logged in using ChatGPT"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(codexBin, "codex"), []byte(codexScript), 0o755); err != nil {
+		t.Fatalf("failed to write fake codex: %v", err)
+	}
+
+	cmd := exec.Command(testSevenBin, "init", "--assume-logged-in")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"PATH="+codexBin+string(os.PathListSeparator)+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"HOME="+fakeHome,
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven init failed: %v\n%s", err, output)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	log := string(logData)
+	wantFileSpec := "-file " + authPath + ":/tmp/host-codex-auth.json"
+	if !strings.Contains(log, wantFileSpec) {
+		t.Fatalf("expected codex auth file upload in sprite exec, got: %s", log)
+	}
+}
+
 func TestNormalizeSpriteName(t *testing.T) {
 	cases := []struct {
 		in   string
