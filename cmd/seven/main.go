@@ -992,6 +992,7 @@ func ensureCodexConfigInSprite(spriteName, hostConfigPath string, opts upOptions
 		"exec",
 		"-s", spriteName,
 		"-file", copySpec,
+		"--",
 		"sh", "-lc", "install -d -m 700 \"$HOME/.codex\" && install -m 600 /tmp/host-codex-config.toml \"$HOME/.codex/config.toml\" && rm -f /tmp/host-codex-config.toml",
 	}
 	if opts.QuietExternal {
@@ -1016,6 +1017,7 @@ func ensureCodexAuthInSprite(spriteName, hostAuthPath string, opts upOptions) er
 		"exec",
 		"-s", spriteName,
 		"-file", copySpec,
+		"--",
 		"sh", "-lc", "install -d -m 700 \"$HOME/.codex\" && install -m 600 /tmp/host-codex-auth.json \"$HOME/.codex/auth.json\" && rm -f /tmp/host-codex-auth.json",
 	}
 	if opts.QuietExternal {
@@ -1105,6 +1107,7 @@ func spriteExec(spriteName string, env []string, quiet bool, args ...string) err
 	for _, kv := range env {
 		cmdArgs = append(cmdArgs, "-env", kv)
 	}
+	cmdArgs = append(cmdArgs, "--")
 	cmdArgs = append(cmdArgs, args...)
 
 	if quiet {
@@ -1122,6 +1125,7 @@ func spriteExecOutput(spriteName string, env []string, args ...string) (string, 
 	for _, kv := range env {
 		cmdArgs = append(cmdArgs, "-env", kv)
 	}
+	cmdArgs = append(cmdArgs, "--")
 	cmdArgs = append(cmdArgs, args...)
 	return runCmdOutput(spriteBin(), nil, cmdArgs...)
 }

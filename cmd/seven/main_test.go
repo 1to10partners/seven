@@ -125,6 +125,54 @@ func TestSevenUpSkipsLoginWhenSpriteExists(t *testing.T) {
 	}
 }
 
+func TestSevenUpSyncsGitIdentityWithExecSeparator(t *testing.T) {
+	repo := t.TempDir()
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	spriteName := "existing-sprite"
+	if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte(spriteName+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .sprite: %v", err)
+	}
+	if err := os.WriteFile(state, []byte(spriteName+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write state: %v", err)
+	}
+
+	fakeHome := t.TempDir()
+	configPath := filepath.Join(fakeHome, ".gitconfig")
+	config := "[user]\n\tname = Test User\n\temail = test@example.com\n"
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatalf("failed to write fake gitconfig: %v", err)
+	}
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+fakeHome,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		"SPRITE_EXEC_REQUIRE_SEPARATOR=1",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven up failed: %v\n%s", err, output)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "exec -s "+spriteName+" -- git config --global user.name Test User") {
+		t.Fatalf("expected git identity sync to use exec separator, got: %s", log)
+	}
+	if !strings.Contains(log, "exec -s "+spriteName+" -- git config --global user.email test@example.com") {
+		t.Fatalf("expected git email sync to use exec separator, got: %s", log)
+	}
+}
+
 func TestSevenUpLogsInWhenSpriteListFails(t *testing.T) {
 	repo := createTempRepo(t)
 	state, logPath, cleanup := createFakeSprite(t)
@@ -910,7 +958,30 @@ case "$cmd" in
     exit 0
     ;;
   exec)
-    logit "exec $*"
+    exec_args="$*"
+    if [ "${SPRITE_EXEC_REQUIRE_SEPARATOR:-}" = "1" ]; then
+      found_separator=0
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --)
+            found_separator=1
+            break
+            ;;
+          -s|-env|-file)
+            shift
+            shift || true
+            ;;
+          *)
+            break
+            ;;
+        esac
+      done
+      if [ "$found_separator" != "1" ]; then
+        logit "exec (missing separator) $exec_args"
+        exit 2
+      fi
+    fi
+    logit "exec $exec_args"
     exit 0
     ;;
   upgrade)
