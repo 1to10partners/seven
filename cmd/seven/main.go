@@ -39,14 +39,16 @@ type spriteNameInfo struct {
 var spritePath string
 var spriteNamePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 var githubSlugPartPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
-var spriteLatestVersionPattern = regexp.MustCompile(`(?m)^Latest version:\s*(\S+)\s*$`)
-var spriteCurrentVersionPattern = regexp.MustCompile(`(?m)^Current version:\s*(\S+)\s*$`)
+var spriteLatestVersionPattern = regexp.MustCompile(`(?im)^Latest(?:\s+client)?\s+version:\s*(\S+)\s*$`)
+var spriteCurrentVersionPattern = regexp.MustCompile(`(?im)^Current(?:\s+client)?\s+version:\s*(\S+)\s*$`)
 
 const (
 	sevenConsoleHookPath   = "$HOME/.seven-console-hook.sh"
 	sevenConsoleMarkerPath = "$HOME/.seven-console-once"
 	sevenDefaultAssistant  = "codex"
 )
+
+var ansiEscapeRe = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
 
 func main() {
 	if len(os.Args) < 2 {
@@ -634,8 +636,9 @@ func maybeUpgradeSpriteCLI(opts upOptions) {
 }
 
 func parseSpriteUpgradeCheckOutput(out string) (latest, current string, ok bool) {
-	latestMatch := spriteLatestVersionPattern.FindStringSubmatch(out)
-	currentMatch := spriteCurrentVersionPattern.FindStringSubmatch(out)
+	cleaned := ansiEscapeRe.ReplaceAllString(out, "")
+	latestMatch := spriteLatestVersionPattern.FindStringSubmatch(cleaned)
+	currentMatch := spriteCurrentVersionPattern.FindStringSubmatch(cleaned)
 	if len(latestMatch) < 2 || len(currentMatch) < 2 {
 		return "", "", false
 	}

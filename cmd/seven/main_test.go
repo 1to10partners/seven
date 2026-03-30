@@ -375,7 +375,6 @@ func TestSevenInitConfiguresGhAuthInSprite(t *testing.T) {
 	repo := createTempRepo(t)
 	state, logPath, cleanup := createFakeSprite(t)
 	defer cleanup()
-
 	ghBin := t.TempDir()
 	token := "gh-test-token"
 	ghScript := `#!/bin/sh
@@ -566,6 +565,17 @@ func TestParseSpriteUpgradeCheckOutput(t *testing.T) {
 	}
 }
 
+func TestParseSpriteUpgradeCheckOutputSupportsCurrentSpriteFormat(t *testing.T) {
+	out := "Checking for updates...\nMigrating configuration from version 1 to 1...\n\x1b[32mLatest client version:\x1b[0m v0.0.2\nCurrent client version: v0.0.1\n"
+	latest, current, ok := parseSpriteUpgradeCheckOutput(out)
+	if !ok {
+		t.Fatalf("expected parseSpriteUpgradeCheckOutput to succeed for current sprite format")
+	}
+	if latest != "v0.0.2" || current != "v0.0.1" {
+		t.Fatalf("unexpected parse result latest=%q current=%q", latest, current)
+	}
+}
+
 func TestParseSpriteUpgradeCheckOutputInvalid(t *testing.T) {
 	if _, _, ok := parseSpriteUpgradeCheckOutput("no version lines"); ok {
 		t.Fatalf("expected parseSpriteUpgradeCheckOutput to fail")
@@ -669,6 +679,25 @@ logit() {
 case "$cmd" in
   login)
     logit "login"
+    exit 0
+    ;;
+  upgrade)
+    if [ "$1" = "--check" ]; then
+      logit "upgrade --check"
+      if [ "${SPRITE_UPGRADE_CHECK_FAIL:-}" = "1" ]; then
+        exit 1
+      fi
+      if [ -n "${SPRITE_UPGRADE_CHECK_OUTPUT:-}" ]; then
+        printf '%s\n' "$SPRITE_UPGRADE_CHECK_OUTPUT"
+      else
+        printf 'Latest client version: v0.0.1\nCurrent client version: v0.0.1\n'
+      fi
+      exit 0
+    fi
+    logit "upgrade"
+    if [ "${SPRITE_UPGRADE_FAIL:-}" = "1" ]; then
+      exit 1
+    fi
     exit 0
     ;;
   list)
