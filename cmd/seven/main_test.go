@@ -565,6 +565,145 @@ func TestParseSpriteUpgradeCheckOutput(t *testing.T) {
 	}
 }
 
+func TestSevenUpNewCreatesNextSiblingAndUpdatesSelection(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte("seven-01\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .sprite: %v", err)
+	}
+	if err := os.WriteFile(state, []byte("seven\nseven-01\nseven-02\n"), 0o644); err != nil {
+		t.Fatalf("failed to write state: %v", err)
+	}
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console", "--new")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven up --new failed: %v\n%s", err, output)
+	}
+
+	data, err := os.ReadFile(filepath.Join(repo, ".sprite"))
+	if err != nil {
+		t.Fatalf("expected .sprite file: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "seven-03" {
+		t.Fatalf("expected .sprite to select seven-03, got %q", got)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "create seven-03") {
+		t.Fatalf("expected create log for seven-03, got: %s", log)
+	}
+}
+
+func TestSevenUpSpriteUsesExplicitNameAndSelectsIt(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console", "--sprite", "review-sprite")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven up --sprite failed: %v\n%s", err, output)
+	}
+
+	data, err := os.ReadFile(filepath.Join(repo, ".sprite"))
+	if err != nil {
+		t.Fatalf("expected .sprite file: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "review-sprite" {
+		t.Fatalf("expected .sprite to select explicit sprite, got %q", got)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	if !strings.Contains(string(logData), "create review-sprite") {
+		t.Fatalf("expected explicit create log, got: %s", logData)
+	}
+}
+
+func TestSevenDestroySpriteKeepsDifferentSelection(t *testing.T) {
+	repo := t.TempDir()
+	state, _, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte("current-sprite\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .sprite: %v", err)
+	}
+	if err := os.WriteFile(state, []byte("current-sprite\nother-sprite\n"), 0o644); err != nil {
+		t.Fatalf("failed to write state: %v", err)
+	}
+
+	cmd := exec.Command(testSevenBin, "destroy", "--sprite", "other-sprite")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven destroy --sprite failed: %v\n%s", err, output)
+	}
+
+	data, err := os.ReadFile(filepath.Join(repo, ".sprite"))
+	if err != nil {
+		t.Fatalf("expected .sprite to remain: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "current-sprite" {
+		t.Fatalf("expected .sprite to keep current selection, got %q", got)
+	}
+
+	stateData, err := os.ReadFile(state)
+	if err != nil {
+		t.Fatalf("failed to read state: %v", err)
+	}
+	if strings.Contains(string(stateData), "other-sprite") {
+		t.Fatalf("expected other-sprite to be removed from state")
+	}
+	if !strings.Contains(string(stateData), "current-sprite") {
+		t.Fatalf("expected current-sprite to remain in state")
+	}
+}
+
+func TestSevenDestroyRequiresSelectedSpriteWithoutFlag(t *testing.T) {
+	repo := t.TempDir()
+	state, _, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	cmd := exec.Command(testSevenBin, "destroy")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected seven destroy to fail without a selected sprite\n%s", output)
+	}
+	if !bytes.Contains(output, []byte("no selected sprite")) {
+		t.Fatalf("expected missing selection error, got: %s", output)
+	}
+}
+
 func TestParseSpriteUpgradeCheckOutputSupportsCurrentSpriteFormat(t *testing.T) {
 	out := "Checking for updates...\nMigrating configuration from version 1 to 1...\n\x1b[32mLatest client version:\x1b[0m v0.0.2\nCurrent client version: v0.0.1\n"
 	latest, current, ok := parseSpriteUpgradeCheckOutput(out)
@@ -690,11 +829,25 @@ case "$cmd" in
       if [ -n "${SPRITE_UPGRADE_CHECK_OUTPUT:-}" ]; then
         printf '%s\n' "$SPRITE_UPGRADE_CHECK_OUTPUT"
       else
-        printf 'Latest client version: v0.0.1\nCurrent client version: v0.0.1\n'
+        latest="${SPRITE_UPGRADE_CHECK_LATEST:-v0.0.1}"
+        current="${SPRITE_UPGRADE_CHECK_CURRENT:-$latest}"
+        printf 'Latest version: %s\nCurrent version: %s\n' "$latest" "$current"
       fi
       exit 0
     fi
-    logit "upgrade"
+    if [ "${SPRITE_UPGRADE_CONFIRM_REQUIRED:-}" = "1" ]; then
+      answer=""
+      IFS= read -r answer || answer=""
+      case "$answer" in
+        y|Y|yes|YES|Yes)
+          ;;
+        *)
+          logit "upgrade (confirm failed)"
+          exit 1
+          ;;
+      esac
+    fi
+    logit "upgrade $*"
     if [ "${SPRITE_UPGRADE_FAIL:-}" = "1" ]; then
       exit 1
     fi

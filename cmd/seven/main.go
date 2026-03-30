@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -27,6 +28,9 @@ type upOptions struct {
 	QuietExternal  bool
 	AssumeLoggedIn bool
 	OpenConsole    bool
+	SpriteName     string
+	NewSprite      bool
+	ResolvedName   string
 }
 
 type spriteNameInfo struct {
@@ -41,6 +45,7 @@ var spriteNamePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])
 var githubSlugPartPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 var spriteLatestVersionPattern = regexp.MustCompile(`(?im)^Latest(?:\s+client)?\s+version:\s*(\S+)\s*$`)
 var spriteCurrentVersionPattern = regexp.MustCompile(`(?im)^Current(?:\s+client)?\s+version:\s*(\S+)\s*$`)
+var spriteSuffixRe = regexp.MustCompile(`^(.*)-([0-9]{2})$`)
 
 const (
 	sevenConsoleHookPath   = "$HOME/.seven-console-hook.sh"
@@ -82,16 +87,16 @@ func usage() {
 	fmt.Printf("version: %s\n", version)
 	fmt.Println()
 	fmt.Println("Usage:")
-	fmt.Println("  seven init [--assume-logged-in]")
-	fmt.Println("  seven up [--assume-logged-in] [--no-console] [--no-tui]")
-	fmt.Println("  seven destroy")
+	fmt.Println("  seven init [--assume-logged-in] [--new] [--sprite name]")
+	fmt.Println("  seven up [--assume-logged-in] [--new] [--sprite name] [--no-console] [--no-tui]")
+	fmt.Println("  seven destroy [--sprite name]")
 	fmt.Println("  seven status")
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  version  Show version")
 	fmt.Println("  init     One-time setup (login, create sprite, clone repo)")
-	fmt.Println("  up       Create or reuse a sprite, bootstrap repo, open console")
-	fmt.Println("  destroy  Destroy the current sprite and remove .sprite file")
+	fmt.Println("  up       Create or reuse the selected sprite, or create a new sibling")
+	fmt.Println("  destroy  Destroy the selected sprite, or a specific sprite via --sprite")
 	fmt.Println("  status   Show sprite status for this repo")
 }
 
@@ -106,12 +111,26 @@ func cmdUp(args []string) {
 	noTUI := fs.Bool("no-tui", false, "disable TUI output")
 	assumeLoggedIn := fs.Bool("assume-logged-in", false, "skip sprite login")
 	noConsole := fs.Bool("no-console", false, "do not open sprite console after up")
+	newSprite := fs.Bool("new", false, "create and select a new sibling sprite")
+	spriteName := fs.String("sprite", "", "use a specific sprite name")
 	_ = fs.Parse(args)
+	if *newSprite && strings.TrimSpace(*spriteName) != "" {
+		fmt.Fprintln(os.Stderr, "seven up failed: --new and --sprite cannot be used together")
+		os.Exit(1)
+	}
 
 	shouldUseTUI := !*noTUI
 	styleEnabled = shouldUseTUI
+	opts := upOptions{
+		Logger:         func(msg string) { fmt.Println(msg) },
+		QuietExternal:  false,
+		AssumeLoggedIn: *assumeLoggedIn,
+		OpenConsole:    !*noConsole,
+		SpriteName:     strings.TrimSpace(*spriteName),
+		NewSprite:      *newSprite,
+	}
 	if shouldUseTUI {
-		res, err := runUpWithTUI(*assumeLoggedIn, !*noConsole)
+		res, err := runUpWithTUI(opts)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "seven up failed: %v\n", err)
 			os.Exit(1)
@@ -125,12 +144,7 @@ func cmdUp(args []string) {
 		return
 	}
 
-	res, err := runUp(upOptions{
-		Logger:         func(msg string) { fmt.Println(msg) },
-		QuietExternal:  false,
-		AssumeLoggedIn: *assumeLoggedIn,
-		OpenConsole:    !*noConsole,
-	})
+	res, err := runUp(opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "seven up failed: %v\n", err)
 		os.Exit(1)
@@ -146,13 +160,21 @@ func cmdUp(args []string) {
 func cmdInit(args []string) {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	assumeLoggedIn := fs.Bool("assume-logged-in", false, "skip sprite login")
+	newSprite := fs.Bool("new", false, "create and select a new sibling sprite")
+	spriteName := fs.String("sprite", "", "use a specific sprite name")
 	_ = fs.Parse(args)
+	if *newSprite && strings.TrimSpace(*spriteName) != "" {
+		fmt.Fprintln(os.Stderr, "seven init failed: --new and --sprite cannot be used together")
+		os.Exit(1)
+	}
 
 	_, err := runInit(upOptions{
 		Logger:         func(msg string) { fmt.Println(msg) },
 		QuietExternal:  false,
 		AssumeLoggedIn: *assumeLoggedIn,
 		OpenConsole:    false,
+		SpriteName:     strings.TrimSpace(*spriteName),
+		NewSprite:      *newSprite,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "seven init failed: %v\n", err)
@@ -162,6 +184,7 @@ func cmdInit(args []string) {
 
 func cmdDestroy(args []string) {
 	fs := flag.NewFlagSet("destroy", flag.ExitOnError)
+	spriteName := fs.String("sprite", "", "destroy a specific sprite name")
 	_ = fs.Parse(args)
 
 	info, err := resolveSpriteName()
@@ -169,7 +192,24 @@ func cmdDestroy(args []string) {
 		fmt.Fprintf(os.Stderr, "failed to resolve sprite name: %v\n", err)
 		os.Exit(1)
 	}
-	name := info.Name
+	name := strings.TrimSpace(*spriteName)
+	clearSelection := false
+	if name == "" {
+		if !info.FromFile {
+			fmt.Fprintln(os.Stderr, "failed to resolve sprite name: no selected sprite; use seven up or pass --sprite")
+			os.Exit(1)
+		}
+		name = info.Name
+		clearSelection = true
+	} else {
+		if err := validateSpriteName(name); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to resolve sprite name: %v\n", err)
+			os.Exit(1)
+		}
+		if info.FromFile && info.Name == name {
+			clearSelection = true
+		}
+	}
 
 	if err := ensureSpriteCLI(); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
@@ -191,19 +231,22 @@ func cmdDestroy(args []string) {
 			fmt.Fprintf(os.Stderr, "sprite destroy failed: %v\n", err)
 			os.Exit(1)
 		}
-		if err := removeSpriteFile(); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to remove .sprite: %v\n", err)
-			os.Exit(1)
+		if clearSelection {
+			if err := removeSpriteFile(); err != nil {
+				fmt.Fprintf(os.Stderr, "failed to remove .sprite: %v\n", err)
+				os.Exit(1)
+			}
 		}
 		fmt.Printf("destroyed sprite: %s\n", name)
 		return
 	}
 
-	if err := removeSpriteFile(); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to remove .sprite: %v\n", err)
-		os.Exit(1)
+	if clearSelection {
+		if err := removeSpriteFile(); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to remove .sprite: %v\n", err)
+			os.Exit(1)
+		}
 	}
-
 	fmt.Printf("sprite not found: %s\n", name)
 }
 
@@ -255,15 +298,17 @@ func runUp(opts upOptions) (upResult, error) {
 	}
 	maybeUpgradeSpriteCLI(opts)
 
+	name, err := resolveTargetSpriteName(opts)
+	if err != nil {
+		return upResult{}, err
+	}
 	info, err := resolveSpriteName()
 	if err != nil {
 		return upResult{}, err
 	}
-	if info.Normalized && !info.FromFile {
+	if opts.SpriteName == "" && opts.ResolvedName == "" && info.Normalized && !info.FromFile {
 		opts.Logger(fmt.Sprintf("[seven up] normalized sprite name from %q to %q (set .sprite to override)", info.Original, info.Name))
 	}
-	name := info.Name
-	fromFile := info.FromFile
 
 	opts.Logger(fmt.Sprintf("[seven up] using sprite name: %s", name))
 
@@ -279,10 +324,8 @@ func runUp(opts upOptions) (upResult, error) {
 	}
 	if exists {
 		opts.Logger("[seven up] sprite exists")
-		if !fromFile {
-			if err := writeSpriteFile(name); err != nil {
-				return upResult{}, err
-			}
+		if err := writeSpriteFile(name); err != nil {
+			return upResult{}, err
 		}
 		if err := syncGitIdentity(name, opts); err != nil {
 			return upResult{}, err
@@ -298,7 +341,9 @@ func runUp(opts upOptions) (upResult, error) {
 		return upResult{Name: name, OpenConsole: opts.OpenConsole, SpriteExists: true}, nil
 	}
 
-	res, err := runInit(opts)
+	initOpts := opts
+	initOpts.ResolvedName = name
+	res, err := runInit(initOpts)
 	if err != nil {
 		return upResult{}, err
 	}
@@ -326,11 +371,16 @@ func runInit(opts upOptions) (upResult, error) {
 	if err != nil {
 		return upResult{}, err
 	}
-	if info.Normalized && !info.FromFile {
+	name := opts.ResolvedName
+	if name == "" {
+		name, err = resolveTargetSpriteName(opts)
+		if err != nil {
+			return upResult{}, err
+		}
+	}
+	if opts.SpriteName == "" && opts.ResolvedName == "" && info.Normalized && !info.FromFile {
 		opts.Logger(fmt.Sprintf("[seven init] normalized sprite name from %q to %q (set .sprite to override)", info.Original, info.Name))
 	}
-	name := info.Name
-	fromFile := info.FromFile
 
 	opts.Logger(fmt.Sprintf("[seven init] using sprite name: %s", name))
 
@@ -340,10 +390,8 @@ func runInit(opts upOptions) (upResult, error) {
 	}
 	if exists {
 		opts.Logger("[seven init] sprite exists")
-		if !fromFile {
-			if err := writeSpriteFile(name); err != nil {
-				return upResult{}, err
-			}
+		if err := writeSpriteFile(name); err != nil {
+			return upResult{}, err
 		}
 		if err := syncGitIdentity(name, opts); err != nil {
 			return upResult{}, err
@@ -427,8 +475,8 @@ func runInit(opts upOptions) (upResult, error) {
 	return upResult{Name: name, OpenConsole: false, SpriteExists: false}, nil
 }
 
-func runUpWithTUI(assumeLoggedIn bool, openConsole bool) (upResult, error) {
-	if !assumeLoggedIn {
+func runUpWithTUI(opts upOptions) (upResult, error) {
+	if !opts.AssumeLoggedIn {
 		if err := ensureSpriteCLI(); err != nil {
 			return upResult{}, err
 		}
@@ -438,20 +486,18 @@ func runUpWithTUI(assumeLoggedIn bool, openConsole bool) (upResult, error) {
 				return upResult{}, err
 			}
 		}
-		assumeLoggedIn = true
+		opts.AssumeLoggedIn = true
 	}
 
 	m := newUpModel()
 	p := tea.NewProgram(m)
 
 	go func() {
-		res, err := runUp(upOptions{
-			Logger: func(msg string) { p.Send(logMsg(msg)) },
-			// TUI mode captures output for cleaner display.
-			QuietExternal:  true,
-			AssumeLoggedIn: assumeLoggedIn,
-			OpenConsole:    openConsole,
-		})
+		runOpts := opts
+		runOpts.Logger = func(msg string) { p.Send(logMsg(msg)) }
+		// TUI mode captures output for cleaner display.
+		runOpts.QuietExternal = true
+		res, err := runUp(runOpts)
 		p.Send(doneMsg{res: res, err: err})
 	}()
 
@@ -479,7 +525,6 @@ func resolveSpriteName() (spriteNameInfo, error) {
 	if err != nil {
 		return spriteNameInfo{}, err
 	}
-
 	name := filepath.Base(cwd)
 	fromFile := false
 	path := filepath.Join(cwd, ".sprite")
@@ -510,6 +555,78 @@ func resolveSpriteName() (spriteNameInfo, error) {
 		return spriteNameInfo{}, fmt.Errorf("invalid sprite name derived from directory %q: %w (set a valid name in .sprite to override)", info.Original, err)
 	}
 	return info, nil
+}
+
+func resolveTargetSpriteName(opts upOptions) (string, error) {
+	if opts.ResolvedName != "" {
+		return opts.ResolvedName, nil
+	}
+	if opts.SpriteName != "" {
+		if err := validateSpriteName(opts.SpriteName); err != nil {
+			return "", err
+		}
+		return opts.SpriteName, nil
+	}
+
+	info, err := resolveSpriteName()
+	if err != nil {
+		return "", err
+	}
+	if !opts.NewSprite {
+		return info.Name, nil
+	}
+
+	base := info.Name
+	if info.FromFile {
+		base = spriteFamilyBase(info.Name)
+	}
+	listOut, err := spriteList()
+	if err != nil {
+		return "", err
+	}
+	return nextSiblingSpriteName(base, listOut), nil
+}
+
+func spriteFamilyBase(name string) string {
+	match := spriteSuffixRe.FindStringSubmatch(name)
+	if len(match) != 3 {
+		return name
+	}
+	return match[1]
+}
+
+func nextSiblingSpriteName(base string, listOut string) string {
+	pattern := regexp.MustCompile(`(^|[^[:alnum:]_])(` + regexp.QuoteMeta(base) + `(?:-[0-9]{2})?)([^[:alnum:]_]|$)`)
+	matches := pattern.FindAllStringSubmatch(listOut, -1)
+	maxOrdinal := 0
+	for _, match := range matches {
+		if len(match) < 3 {
+			continue
+		}
+		ordinal, ok := spriteFamilyOrdinal(base, match[2])
+		if !ok {
+			continue
+		}
+		if ordinal > maxOrdinal {
+			maxOrdinal = ordinal
+		}
+	}
+	return fmt.Sprintf("%s-%02d", base, maxOrdinal+1)
+}
+
+func spriteFamilyOrdinal(base, name string) (int, bool) {
+	if name == base {
+		return 0, true
+	}
+	match := spriteSuffixRe.FindStringSubmatch(name)
+	if len(match) != 3 || match[1] != base {
+		return 0, false
+	}
+	value, err := strconv.Atoi(match[2])
+	if err != nil {
+		return 0, false
+	}
+	return value, true
 }
 
 func writeSpriteFile(name string) error {
