@@ -400,6 +400,9 @@ func TestSevenInitSetsUpSpriteWithoutConsole(t *testing.T) {
 	if !strings.Contains(log, ".bashrc") || !strings.Contains(log, ".zshrc") {
 		t.Fatalf("expected shell rc setup for bash and zsh, got: %s", log)
 	}
+	if !strings.Contains(log, ".config/fish/conf.d/seven-console.fish") {
+		t.Fatalf("expected fish shell bootstrap setup, got: %s", log)
+	}
 	if strings.Contains(log, "console -s "+name) {
 		t.Fatalf("did not expect console log, got: %s", log)
 	}
@@ -677,6 +680,7 @@ exit 0
 		"PATH="+claudeBin+string(os.PathListSeparator)+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"SPRITE_STATE="+state,
 		"SPRITE_LOG="+logPath,
+		`SPRITE_EXEC_CLAUDE_AUTH_STATUS_JSON={"loggedIn":true}`,
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -704,6 +708,76 @@ exit 0
 	}
 	if !strings.Contains(log, "-env SEVEN_REPO_DIR="+spriteName+",SEVEN_ASSISTANT=claude") {
 		t.Fatalf("expected claude to be selected for console hint, got: %s", log)
+	}
+}
+
+func TestSevenInitFallsBackWhenClaudeAuthIsNotUsableInSprite(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	fakeHome := t.TempDir()
+	claudeDir := filepath.Join(fakeHome, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatalf("failed to create fake claude dir: %v", err)
+	}
+	authPath := filepath.Join(fakeHome, ".claude.json")
+	if err := os.WriteFile(authPath, []byte(`{"oauthAccount":{"emailAddress":"test@example.com"}}`), 0o600); err != nil {
+		t.Fatalf("failed to write fake claude auth file: %v", err)
+	}
+	configPath := filepath.Join(claudeDir, "settings.json")
+	if err := os.WriteFile(configPath, []byte(`{"theme":"dark-ansi"}`), 0o600); err != nil {
+		t.Fatalf("failed to write fake claude config file: %v", err)
+	}
+
+	claudeBin := t.TempDir()
+	claudeScript := `#!/bin/sh
+if [ "$1" = "auth" ] && [ "$2" = "status" ] && [ "$3" = "--json" ]; then
+  echo '{"loggedIn":true,"authMethod":"oauth","apiProvider":"firstParty"}'
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(claudeBin, "claude"), []byte(claudeScript), 0o755); err != nil {
+		t.Fatalf("failed to write fake claude: %v", err)
+	}
+
+	cmd := exec.Command(testSevenBin, "init", "--assume-logged-in")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+fakeHome,
+		"PATH="+claudeBin+string(os.PathListSeparator)+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		`SPRITE_EXEC_CLAUDE_AUTH_STATUS_JSON={"loggedIn":false}`,
+		"SPRITE_EXEC_CLAUDE_AUTH_STATUS_EXIT=1",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven init failed: %v\n%s", err, output)
+	}
+
+	spriteData, err := os.ReadFile(filepath.Join(repo, ".sprite"))
+	if err != nil {
+		t.Fatalf("expected .sprite file: %v", err)
+	}
+	spriteName := strings.TrimSpace(string(spriteData))
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	log := string(logData)
+	wantAuthFileSpec := "-file " + authPath + ":/tmp/host-claude-auth.json"
+	if !strings.Contains(log, wantAuthFileSpec) {
+		t.Fatalf("expected claude auth file upload in sprite exec, got: %s", log)
+	}
+	wantConfigFileSpec := "-file " + configPath + ":/tmp/host-claude-settings.json"
+	if !strings.Contains(log, wantConfigFileSpec) {
+		t.Fatalf("expected claude config file upload in sprite exec, got: %s", log)
+	}
+	if !strings.Contains(log, "-env SEVEN_REPO_DIR="+spriteName+",SEVEN_ASSISTANT=codex") {
+		t.Fatalf("expected codex fallback for console hint, got: %s", log)
 	}
 }
 
@@ -1135,6 +1209,17 @@ case "$cmd" in
       fi
     fi
     logit "exec $exec_args"
+    case "$exec_args" in
+      *" -- claude auth status --json")
+        if [ -n "${SPRITE_EXEC_CLAUDE_AUTH_STATUS_JSON:-}" ]; then
+          printf '%s\n' "$SPRITE_EXEC_CLAUDE_AUTH_STATUS_JSON"
+        fi
+        if [ -n "${SPRITE_EXEC_CLAUDE_AUTH_STATUS_EXIT:-}" ]; then
+          exit "$SPRITE_EXEC_CLAUDE_AUTH_STATUS_EXIT"
+        fi
+        exit 0
+        ;;
+    esac
     exit 0
     ;;
   upgrade)
