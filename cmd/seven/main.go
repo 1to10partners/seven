@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -38,6 +39,14 @@ type spriteNameInfo struct {
 	FromFile   bool
 	Original   string
 	Normalized bool
+}
+
+type hostAssistantState struct {
+	PreferredAssistant string
+	CodexConfigPath    string
+	CodexAuthPath      string
+	ClaudeConfigPath   string
+	ClaudeAuthPath     string
 }
 
 var spritePath string
@@ -330,13 +339,10 @@ func runUp(opts upOptions) (upResult, error) {
 		if err := syncGitIdentity(name, opts); err != nil {
 			return upResult{}, err
 		}
-		codexConfigPath := detectHostCodexConfig(opts)
-		if err := ensureCodexConfigInSprite(name, codexConfigPath, opts); err != nil {
-			opts.Logger(fmt.Sprintf("[seven up] codex config setup failed: %v", err))
-		}
-		codexAuthPath := detectHostCodexChatGPTAuth(opts)
-		if err := ensureCodexAuthInSprite(name, codexAuthPath, opts); err != nil {
-			opts.Logger(fmt.Sprintf("[seven up] codex auth setup failed: %v", err))
+		assistantState := detectHostAssistantState(opts)
+		syncHostAssistantState(name, assistantState, "[seven up]", opts)
+		if err := configureConsoleBootstrapInSprite(name, name, assistantState.PreferredAssistant, opts); err != nil {
+			opts.Logger(fmt.Sprintf("[seven up] console bootstrap setup failed: %v", err))
 		}
 		return upResult{Name: name, OpenConsole: opts.OpenConsole, SpriteExists: true}, nil
 	}
@@ -396,13 +402,10 @@ func runInit(opts upOptions) (upResult, error) {
 		if err := syncGitIdentity(name, opts); err != nil {
 			return upResult{}, err
 		}
-		codexConfigPath := detectHostCodexConfig(opts)
-		if err := ensureCodexConfigInSprite(name, codexConfigPath, opts); err != nil {
-			opts.Logger(fmt.Sprintf("[seven init] codex config setup failed: %v", err))
-		}
-		codexAuthPath := detectHostCodexChatGPTAuth(opts)
-		if err := ensureCodexAuthInSprite(name, codexAuthPath, opts); err != nil {
-			opts.Logger(fmt.Sprintf("[seven init] codex auth setup failed: %v", err))
+		assistantState := detectHostAssistantState(opts)
+		syncHostAssistantState(name, assistantState, "[seven init]", opts)
+		if err := configureConsoleBootstrapInSprite(name, name, assistantState.PreferredAssistant, opts); err != nil {
+			opts.Logger(fmt.Sprintf("[seven init] console bootstrap setup failed: %v", err))
 		}
 		return upResult{Name: name, OpenConsole: false, SpriteExists: true}, nil
 	}
@@ -429,17 +432,11 @@ func runInit(opts upOptions) (upResult, error) {
 	if err != nil {
 		return upResult{}, err
 	}
+	assistantState := detectHostAssistantState(opts)
 	if err := ensureGhAuthInSprite(name, ghToken, opts); err != nil {
 		opts.Logger(fmt.Sprintf("[seven init] gh auth setup failed: %v", err))
 	}
-	codexConfigPath := detectHostCodexConfig(opts)
-	if err := ensureCodexConfigInSprite(name, codexConfigPath, opts); err != nil {
-		opts.Logger(fmt.Sprintf("[seven init] codex config setup failed: %v", err))
-	}
-	codexAuthPath := detectHostCodexChatGPTAuth(opts)
-	if err := ensureCodexAuthInSprite(name, codexAuthPath, opts); err != nil {
-		opts.Logger(fmt.Sprintf("[seven init] codex auth setup failed: %v", err))
-	}
+	syncHostAssistantState(name, assistantState, "[seven init]", opts)
 
 	if repoURL == "" {
 		opts.Logger("[seven init] no repo url found, skipping clone")
@@ -458,7 +455,7 @@ func runInit(opts upOptions) (upResult, error) {
 				return upResult{}, err
 			}
 		}
-		if err := configureConsoleBootstrapInSprite(name, name, sevenDefaultAssistant, opts); err != nil {
+		if err := configureConsoleBootstrapInSprite(name, name, assistantState.PreferredAssistant, opts); err != nil {
 			opts.Logger(fmt.Sprintf("[seven init] console bootstrap setup failed: %v", err))
 		}
 		return upResult{Name: name, OpenConsole: false, SpriteExists: false}, nil
@@ -468,7 +465,7 @@ func runInit(opts upOptions) (upResult, error) {
 	if err := spriteExec(name, nil, opts.QuietExternal, "git", "clone", repoURL, name); err != nil {
 		return upResult{}, err
 	}
-	if err := configureConsoleBootstrapInSprite(name, name, sevenDefaultAssistant, opts); err != nil {
+	if err := configureConsoleBootstrapInSprite(name, name, assistantState.PreferredAssistant, opts); err != nil {
 		opts.Logger(fmt.Sprintf("[seven init] console bootstrap setup failed: %v", err))
 	}
 
@@ -722,6 +719,11 @@ func ensureSpriteCLI() error {
 }
 
 func maybeUpgradeSpriteCLI(opts upOptions) {
+	if os.Getenv("SEVEN_SKIP_SPRITE_UPGRADE") == "1" {
+		opts.Logger("[seven up] skipping sprite CLI update check")
+		return
+	}
+
 	opts.Logger("[seven up] checking sprite CLI updates")
 	out, err := runCmdOutput(spriteBin(), nil, "upgrade", "--check")
 	if err != nil {
@@ -767,7 +769,7 @@ func configureConsoleBootstrapInSprite(spriteName, repoDir, assistant string, op
 		return nil
 	}
 
-	opts.Logger(fmt.Sprintf("[seven init] configuring first console launch: cd %s && %s", repoDir, assistant))
+	opts.Logger(fmt.Sprintf("[seven init] configuring first console launch: cd %s (assistant: %s)", repoDir, assistant))
 	env := []string{"SEVEN_REPO_DIR=" + repoDir + ",SEVEN_ASSISTANT=" + assistant}
 	cmd := `set -e
 cat > "` + sevenConsoleHookPath + `" <<'EOF'
@@ -795,8 +797,7 @@ if [ -n "$repo_path" ] && [ -d "$repo_path" ]; then
 fi
 
 if [ -n "$assistant_cmd" ] && command -v "$assistant_cmd" >/dev/null 2>&1; then
-  export SEVEN_CONSOLE_BOOTSTRAP_RUNNING=1
-  exec "$assistant_cmd"
+  printf '\nseven: ready in %s. Run %s when you want.\n\n' "$repo_path" "$assistant_cmd"
 fi
 EOF
 chmod 600 "` + sevenConsoleHookPath + `"
@@ -935,6 +936,85 @@ func ensureGhAuthInSprite(spriteName, ghToken string, opts upOptions) error {
 	return nil
 }
 
+func detectHostAssistantState(opts upOptions) hostAssistantState {
+	state := hostAssistantState{
+		PreferredAssistant: sevenDefaultAssistant,
+	}
+	state.ClaudeAuthPath = detectHostClaudeAuth(opts)
+	state.ClaudeConfigPath = detectHostClaudeConfig(opts)
+	state.CodexAuthPath = detectHostCodexChatGPTAuth(opts)
+	state.CodexConfigPath = detectHostCodexConfig(opts)
+
+	switch {
+	case state.ClaudeAuthPath != "":
+		state.PreferredAssistant = "claude"
+	case state.CodexAuthPath != "":
+		state.PreferredAssistant = "codex"
+	}
+
+	return state
+}
+
+func syncHostAssistantState(spriteName string, state hostAssistantState, phase string, opts upOptions) {
+	if err := ensureClaudeConfigInSprite(spriteName, state.ClaudeConfigPath, opts); err != nil {
+		opts.Logger(fmt.Sprintf("%s claude config setup failed: %v", phase, err))
+	}
+	if err := ensureClaudeAuthInSprite(spriteName, state.ClaudeAuthPath, opts); err != nil {
+		opts.Logger(fmt.Sprintf("%s claude auth setup failed: %v", phase, err))
+	}
+	if err := ensureCodexConfigInSprite(spriteName, state.CodexConfigPath, opts); err != nil {
+		opts.Logger(fmt.Sprintf("%s codex config setup failed: %v", phase, err))
+	}
+	if err := ensureCodexAuthInSprite(spriteName, state.CodexAuthPath, opts); err != nil {
+		opts.Logger(fmt.Sprintf("%s codex auth setup failed: %v", phase, err))
+	}
+}
+
+func detectHostClaudeAuth(opts upOptions) string {
+	if _, err := exec.LookPath("claude"); err != nil {
+		return ""
+	}
+
+	status, err := runCmdOutput("claude", nil, "auth", "status", "--json")
+	if err != nil {
+		return ""
+	}
+	var parsed struct {
+		LoggedIn bool `json:"loggedIn"`
+	}
+	if err := json.Unmarshal([]byte(status), &parsed); err != nil || !parsed.LoggedIn {
+		return ""
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	authPath := filepath.Join(home, ".claude.json")
+	info, err := os.Stat(authPath)
+	if err != nil || info.IsDir() || info.Size() == 0 {
+		return ""
+	}
+
+	opts.Logger("[seven init] detected host Claude Code auth")
+	return authPath
+}
+
+func detectHostClaudeConfig(opts upOptions) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	configPath := filepath.Join(home, ".claude", "settings.json")
+	info, err := os.Stat(configPath)
+	if err != nil || info.IsDir() || info.Size() == 0 {
+		return ""
+	}
+
+	opts.Logger("[seven init] detected host Claude Code config")
+	return configPath
+}
+
 func detectHostCodexChatGPTAuth(opts upOptions) string {
 	if _, err := exec.LookPath("codex"); err != nil {
 		return ""
@@ -975,6 +1055,56 @@ func detectHostCodexConfig(opts upOptions) string {
 
 	opts.Logger("[seven init] detected host codex config")
 	return configPath
+}
+
+func ensureClaudeConfigInSprite(spriteName, hostConfigPath string, opts upOptions) error {
+	if hostConfigPath == "" {
+		return nil
+	}
+	if err := spriteExec(spriteName, nil, opts.QuietExternal, "sh", "-lc", "command -v claude >/dev/null 2>&1"); err != nil {
+		opts.Logger("[seven init] claude not found in sprite, skipping claude config sync")
+		return nil
+	}
+
+	opts.Logger("[seven init] syncing claude config into sprite")
+	copySpec := hostConfigPath + ":/tmp/host-claude-settings.json"
+	cmdArgs := []string{
+		"exec",
+		"-s", spriteName,
+		"-file", copySpec,
+		"--",
+		"sh", "-lc", "install -d -m 700 \"$HOME/.claude\" && install -m 600 /tmp/host-claude-settings.json \"$HOME/.claude/settings.json\" && rm -f /tmp/host-claude-settings.json",
+	}
+	if opts.QuietExternal {
+		_, err := runCmdOutput(spriteBin(), nil, cmdArgs...)
+		return err
+	}
+	return runCmd(spriteBin(), nil, cmdArgs...)
+}
+
+func ensureClaudeAuthInSprite(spriteName, hostAuthPath string, opts upOptions) error {
+	if hostAuthPath == "" {
+		return nil
+	}
+	if err := spriteExec(spriteName, nil, opts.QuietExternal, "sh", "-lc", "command -v claude >/dev/null 2>&1"); err != nil {
+		opts.Logger("[seven init] claude not found in sprite, skipping claude auth sync")
+		return nil
+	}
+
+	opts.Logger("[seven init] syncing claude auth into sprite")
+	copySpec := hostAuthPath + ":/tmp/host-claude-auth.json"
+	cmdArgs := []string{
+		"exec",
+		"-s", spriteName,
+		"-file", copySpec,
+		"--",
+		"sh", "-lc", "install -m 600 /tmp/host-claude-auth.json \"$HOME/.claude.json\" && rm -f /tmp/host-claude-auth.json",
+	}
+	if opts.QuietExternal {
+		_, err := runCmdOutput(spriteBin(), nil, cmdArgs...)
+		return err
+	}
+	return runCmd(spriteBin(), nil, cmdArgs...)
 }
 
 func ensureCodexConfigInSprite(spriteName, hostConfigPath string, opts upOptions) error {

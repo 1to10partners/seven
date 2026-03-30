@@ -12,6 +12,10 @@ import (
 	"time"
 )
 
+func integrationSevenEnv() []string {
+	return append(os.Environ(), "SEVEN_SKIP_SPRITE_UPGRADE=1")
+}
+
 func TestIntegrationUpDestroy(t *testing.T) {
 	if os.Getenv("SEVEN_INTEGRATION") != "1" {
 		t.Skip("set SEVEN_INTEGRATION=1 to run integration tests")
@@ -34,7 +38,7 @@ func TestIntegrationUpDestroy(t *testing.T) {
 	cmdInit.Dir = repo
 	cmdInit.Stdout = os.Stdout
 	cmdInit.Stderr = os.Stderr
-	cmdInit.Env = os.Environ()
+	cmdInit.Env = integrationSevenEnv()
 	if err := cmdInit.Run(); err != nil {
 		t.Fatalf("seven init failed: %v", err)
 	}
@@ -43,7 +47,7 @@ func TestIntegrationUpDestroy(t *testing.T) {
 	cmdUp.Dir = repo
 	cmdUp.Stdout = os.Stdout
 	cmdUp.Stderr = os.Stderr
-	cmdUp.Env = os.Environ()
+	cmdUp.Env = integrationSevenEnv()
 	if err := cmdUp.Run(); err != nil {
 		t.Fatalf("seven up failed: %v", err)
 	}
@@ -99,7 +103,7 @@ func TestIntegrationInitWithGitRemote(t *testing.T) {
 	cmdInit.Dir = repo
 	cmdInit.Stdout = os.Stdout
 	cmdInit.Stderr = os.Stderr
-	cmdInit.Env = os.Environ()
+	cmdInit.Env = integrationSevenEnv()
 	if err := cmdInit.Run(); err != nil {
 		t.Fatalf("seven init failed: %v", err)
 	}
@@ -188,7 +192,7 @@ func TestIntegrationConsoleBootstrapRunsCodexInRepo(t *testing.T) {
 	cmdInit.Dir = repo
 	cmdInit.Stdout = os.Stdout
 	cmdInit.Stderr = os.Stderr
-	cmdInit.Env = os.Environ()
+	cmdInit.Env = integrationSevenEnv()
 	if err := cmdInit.Run(); err != nil {
 		t.Fatalf("seven init failed: %v", err)
 	}
@@ -275,7 +279,7 @@ func TestIntegrationInitNormalizesForbiddenDirName(t *testing.T) {
 	cmdInit.Dir = repo
 	cmdInit.Stdout = os.Stdout
 	cmdInit.Stderr = os.Stderr
-	cmdInit.Env = os.Environ()
+	cmdInit.Env = integrationSevenEnv()
 	if err := cmdInit.Run(); err != nil {
 		t.Fatalf("seven init failed: %v", err)
 	}
@@ -329,7 +333,7 @@ func TestIntegrationGhAuthPersistsInSprite(t *testing.T) {
 	cmdInit.Dir = repo
 	cmdInit.Stdout = os.Stdout
 	cmdInit.Stderr = os.Stderr
-	cmdInit.Env = os.Environ()
+	cmdInit.Env = integrationSevenEnv()
 	if err := cmdInit.Run(); err != nil {
 		t.Fatalf("seven init failed: %v", err)
 	}
@@ -396,7 +400,7 @@ func TestIntegrationCodexChatGPTAuthPersistsInSprite(t *testing.T) {
 	cmdInit.Dir = repo
 	cmdInit.Stdout = os.Stdout
 	cmdInit.Stderr = os.Stderr
-	cmdInit.Env = os.Environ()
+	cmdInit.Env = integrationSevenEnv()
 	if err := cmdInit.Run(); err != nil {
 		t.Fatalf("seven init failed: %v", err)
 	}
@@ -431,7 +435,7 @@ func destroySprite(t *testing.T, repo string) {
 	cmdDestroy.Dir = repo
 	cmdDestroy.Stdout = os.Stdout
 	cmdDestroy.Stderr = os.Stderr
-	cmdDestroy.Env = os.Environ()
+	cmdDestroy.Env = integrationSevenEnv()
 	if err := cmdDestroy.Run(); err != nil {
 		t.Fatalf("seven destroy failed: %v", err)
 	}

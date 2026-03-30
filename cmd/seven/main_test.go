@@ -173,6 +173,53 @@ func TestSevenUpSyncsGitIdentityWithExecSeparator(t *testing.T) {
 	}
 }
 
+func TestSevenUpExistingSpriteRefreshesConsoleBootstrap(t *testing.T) {
+	repo := t.TempDir()
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	spriteName := "existing-sprite"
+	if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte(spriteName+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .sprite: %v", err)
+	}
+	if err := os.WriteFile(state, []byte(spriteName+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write state: %v", err)
+	}
+
+	fakeHome := t.TempDir()
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+fakeHome,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven up failed: %v\n%s", err, output)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, ".seven-console-hook.sh") || !strings.Contains(log, ".seven-console-once") {
+		t.Fatalf("expected existing sprite up to refresh console bootstrap, got: %s", log)
+	}
+	if !strings.Contains(log, "-env SEVEN_REPO_DIR="+spriteName+",SEVEN_ASSISTANT=codex") {
+		t.Fatalf("expected existing sprite up to refresh bootstrap with default assistant, got: %s", log)
+	}
+	if strings.Contains(log, "exec \"$assistant_cmd\"") {
+		t.Fatalf("expected console bootstrap to stop exec-replacing the shell, got: %s", log)
+	}
+	if !strings.Contains(log, "Run %s when you want.") {
+		t.Fatalf("expected console bootstrap to print an assistant hint instead of exec, got: %s", log)
+	}
+}
+
 func TestSevenUpLogsInWhenSpriteListFails(t *testing.T) {
 	repo := createTempRepo(t)
 	state, logPath, cleanup := createFakeSprite(t)
@@ -262,14 +309,49 @@ func TestSevenUpAutoUpgradesSpriteCLIWithNonInteractiveConfirmation(t *testing.T
 	}
 }
 
+func TestSevenUpSkipsSpriteUpgradeCheckWhenEnvSet(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-console", "--no-tui")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		"SPRITE_UPGRADE_CHECK_LATEST=v0.0.2",
+		"SPRITE_UPGRADE_CHECK_CURRENT=v0.0.1",
+		"SEVEN_SKIP_SPRITE_UPGRADE=1",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven up failed: %v\n%s", err, output)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	log := string(logData)
+	if strings.Contains(log, "upgrade --check") {
+		t.Fatalf("expected sprite upgrade check to be skipped, got: %s", log)
+	}
+	if !bytes.Contains(output, []byte("[seven up] skipping sprite CLI update check")) {
+		t.Fatalf("expected skip log in output, got: %s", output)
+	}
+}
+
 func TestSevenInitSetsUpSpriteWithoutConsole(t *testing.T) {
 	repo := createTempRepo(t)
 	state, logPath, cleanup := createFakeSprite(t)
 	defer cleanup()
 
+	fakeHome := t.TempDir()
 	cmd := exec.Command(testSevenBin, "init", "--assume-logged-in")
 	cmd.Dir = repo
 	cmd.Env = append(os.Environ(),
+		"HOME="+fakeHome,
 		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"SPRITE_STATE="+state,
 		"SPRITE_LOG="+logPath,
@@ -309,8 +391,11 @@ func TestSevenInitSetsUpSpriteWithoutConsole(t *testing.T) {
 	if !strings.Contains(log, "-env SEVEN_REPO_DIR="+name+",SEVEN_ASSISTANT=codex") {
 		t.Fatalf("expected env vars to be comma-joined for sprite exec, got: %s", log)
 	}
-	if !strings.Contains(log, "exec \"$assistant_cmd\"") {
-		t.Fatalf("expected assistant command to execute directly, got: %s", log)
+	if strings.Contains(log, "exec \"$assistant_cmd\"") {
+		t.Fatalf("expected console bootstrap to keep the shell usable, got: %s", log)
+	}
+	if !strings.Contains(log, "Run %s when you want.") {
+		t.Fatalf("expected console bootstrap to print an assistant hint, got: %s", log)
 	}
 	if !strings.Contains(log, ".bashrc") || !strings.Contains(log, ".zshrc") {
 		t.Fatalf("expected shell rc setup for bash and zsh, got: %s", log)
@@ -551,6 +636,74 @@ func TestSevenInitSyncsCodexConfigInSprite(t *testing.T) {
 	wantFileSpec := "-file " + configPath + ":/tmp/host-codex-config.toml"
 	if !strings.Contains(log, wantFileSpec) {
 		t.Fatalf("expected codex config file upload in sprite exec, got: %s", log)
+	}
+}
+
+func TestSevenInitSyncsClaudeAuthAndConfigInSprite(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	fakeHome := t.TempDir()
+	claudeDir := filepath.Join(fakeHome, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatalf("failed to create fake claude dir: %v", err)
+	}
+	authPath := filepath.Join(fakeHome, ".claude.json")
+	if err := os.WriteFile(authPath, []byte(`{"oauthAccount":{"emailAddress":"test@example.com"}}`), 0o600); err != nil {
+		t.Fatalf("failed to write fake claude auth file: %v", err)
+	}
+	configPath := filepath.Join(claudeDir, "settings.json")
+	if err := os.WriteFile(configPath, []byte(`{"theme":"dark-ansi"}`), 0o600); err != nil {
+		t.Fatalf("failed to write fake claude config file: %v", err)
+	}
+
+	claudeBin := t.TempDir()
+	claudeScript := `#!/bin/sh
+if [ "$1" = "auth" ] && [ "$2" = "status" ] && [ "$3" = "--json" ]; then
+  echo '{"loggedIn":true,"authMethod":"oauth","apiProvider":"firstParty"}'
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(claudeBin, "claude"), []byte(claudeScript), 0o755); err != nil {
+		t.Fatalf("failed to write fake claude: %v", err)
+	}
+
+	cmd := exec.Command(testSevenBin, "init", "--assume-logged-in")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+fakeHome,
+		"PATH="+claudeBin+string(os.PathListSeparator)+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven init failed: %v\n%s", err, output)
+	}
+
+	spriteData, err := os.ReadFile(filepath.Join(repo, ".sprite"))
+	if err != nil {
+		t.Fatalf("expected .sprite file: %v", err)
+	}
+	spriteName := strings.TrimSpace(string(spriteData))
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	log := string(logData)
+	wantAuthFileSpec := "-file " + authPath + ":/tmp/host-claude-auth.json"
+	if !strings.Contains(log, wantAuthFileSpec) {
+		t.Fatalf("expected claude auth file upload in sprite exec, got: %s", log)
+	}
+	wantConfigFileSpec := "-file " + configPath + ":/tmp/host-claude-settings.json"
+	if !strings.Contains(log, wantConfigFileSpec) {
+		t.Fatalf("expected claude config file upload in sprite exec, got: %s", log)
+	}
+	if !strings.Contains(log, "-env SEVEN_REPO_DIR="+spriteName+",SEVEN_ASSISTANT=claude") {
+		t.Fatalf("expected claude to be selected for console hint, got: %s", log)
 	}
 }
 
