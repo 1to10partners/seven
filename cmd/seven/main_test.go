@@ -782,11 +782,82 @@ exit 0
 	}
 }
 
+func TestDetectHostClaudeCredentialsLinux(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("Linux credential-file path; macOS uses the keychain")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	if got := detectHostClaudeCredentials(upOptions{Logger: func(string) {}}); got.present() {
+		t.Fatalf("expected no credentials before file exists, got %+v", got)
+	}
+
+	claudeDir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	credPath := filepath.Join(claudeDir, ".credentials.json")
+	if err := os.WriteFile(credPath, []byte(`{"claudeAiOauth":{"accessToken":"x","refreshToken":"y"}}`), 0o600); err != nil {
+		t.Fatalf("write creds: %v", err)
+	}
+
+	got := detectHostClaudeCredentials(upOptions{Logger: func(string) {}})
+	if got.FilePath != credPath || got.Keychain {
+		t.Fatalf("expected FilePath=%q keychain=false, got %+v", credPath, got)
+	}
+}
+
+func TestSevenInitSyncsClaudeCredentialsInSprite(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("Linux credential-file path; macOS keychain extraction verified manually")
+	}
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	fakeHome := t.TempDir()
+	claudeDir := filepath.Join(fakeHome, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
+		t.Fatalf("failed to create fake claude dir: %v", err)
+	}
+	credPath := filepath.Join(claudeDir, ".credentials.json")
+	if err := os.WriteFile(credPath, []byte(`{"claudeAiOauth":{"accessToken":"x","refreshToken":"y"}}`), 0o600); err != nil {
+		t.Fatalf("failed to write fake claude credentials: %v", err)
+	}
+
+	cmd := exec.Command(testSevenBin, "init", "--assume-logged-in")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+fakeHome,
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven init failed: %v\n%s", err, output)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	log := string(logData)
+	wantSpec := "-file " + credPath + ":/tmp/host-claude-credentials.json"
+	if !strings.Contains(log, wantSpec) {
+		t.Fatalf("expected claude credentials file upload in sprite exec, got: %s", log)
+	}
+	if !strings.Contains(log, "$HOME/.claude/.credentials.json") {
+		t.Fatalf("expected credentials install into ~/.claude/.credentials.json, got: %s", log)
+	}
+}
+
 func TestDeepMergeJSON(t *testing.T) {
 	t.Run("preserves sprite-only keys", func(t *testing.T) {
 		sprite := map[string]interface{}{
 			"skipDangerousModePermissionPrompt": true,
-			"theme": "light",
+			"theme":                             "light",
 		}
 		host := map[string]interface{}{
 			"theme": "dark-ansi",

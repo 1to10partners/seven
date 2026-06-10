@@ -48,6 +48,14 @@ On first run, `seven up` will prompt you to run `sprite login`, then create the 
 
 Once inside the sprite, cd into your folder and start your favorite assistant. The following come pre-installed: `claude`, `codex`, `cursor-agent`, and `gemini-cli`.
 
+### Assistant authentication
+On every `seven up`, seven re-syncs your host assistant credentials into the sprite so a sprite created days ago keeps working after your host login refreshes:
+
+- **Claude Code:** seven syncs the real OAuth credential store, not just `~/.claude.json`. On Linux that's `~/.claude/.credentials.json`; on macOS the tokens live in the login Keychain (service `claude-code` / `Claude Code-credentials`), which seven extracts and writes into the sprite. (The Keychain read may show a one-time access prompt.) `~/.claude/settings.json` and `~/.claude.json` are still deep-merged so sprite-only keys are preserved.
+- **Codex:** `~/.codex/auth.json` is synced as before.
+
+Because the freshest host token is copied in on each `up`, an expired token inside the sprite is simply replaced. If the synced credentials still don't validate (e.g. a revoked/rotated refresh token), seven prints a warning and the exact command to re-authenticate from inside the sprite — run `claude` (or `codex login`) there and retry. Note that the host and a sprite share one refresh token, so a refresh on one side can occasionally invalidate the other ("token has already been used"); the fix is the same in-sprite re-login.
+
 ### Uninstall
 Remove the installed binary (defaults to `~/.local/bin`):
 

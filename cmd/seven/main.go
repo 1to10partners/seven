@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -47,7 +48,24 @@ type hostAssistantState struct {
 	CodexAuthPath      string
 	ClaudeConfigPath   string
 	ClaudeAuthPath     string
+	ClaudeCredentials  claudeCredentialsSource
 }
+
+// claudeCredentialsSource describes where the host's Claude Code OAuth
+// credentials (access + refresh tokens) live. On Linux they are a file; on
+// macOS they live in the login Keychain and must be extracted.
+type claudeCredentialsSource struct {
+	FilePath string // non-empty: copy this file into the sprite
+	Keychain bool   // true: extract from the macOS login Keychain
+}
+
+func (c claudeCredentialsSource) present() bool {
+	return c.FilePath != "" || c.Keychain
+}
+
+// claudeKeychainServices are the macOS Keychain service names Claude Code has
+// used for its credentials item, newest first.
+var claudeKeychainServices = []string{"Claude Code-credentials", "claude-code"}
 
 var spritePath string
 var spriteNamePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -972,6 +990,7 @@ func detectHostAssistantState(opts upOptions) hostAssistantState {
 	}
 	state.ClaudeAuthPath = detectHostClaudeAuth(opts)
 	state.ClaudeConfigPath = detectHostClaudeConfig(opts)
+	state.ClaudeCredentials = detectHostClaudeCredentials(opts)
 	state.CodexAuthPath = detectHostCodexChatGPTAuth(opts)
 	state.CodexConfigPath = detectHostCodexConfig(opts)
 
@@ -992,6 +1011,9 @@ func syncHostAssistantState(spriteName string, state hostAssistantState, phase s
 	if err := ensureClaudeAuthInSprite(spriteName, state.ClaudeAuthPath, opts); err != nil {
 		opts.Logger(fmt.Sprintf("%s claude auth setup failed: %v", phase, err))
 	}
+	if err := ensureClaudeCredentialsInSprite(spriteName, state.ClaudeCredentials, opts); err != nil {
+		opts.Logger(fmt.Sprintf("%s claude credentials setup failed: %v", phase, err))
+	}
 	if err := ensureCodexConfigInSprite(spriteName, state.CodexConfigPath, opts); err != nil {
 		opts.Logger(fmt.Sprintf("%s codex config setup failed: %v", phase, err))
 	}
@@ -1008,8 +1030,8 @@ func resolvePreferredAssistantInSprite(spriteName string, state hostAssistantSta
 		opts.Logger(fmt.Sprintf("%s claude auth validation failed: %v", phase, err))
 	} else if loggedIn {
 		return "claude"
-	} else if state.ClaudeAuthPath != "" {
-		opts.Logger(fmt.Sprintf("%s claude auth is not usable in sprite; falling back to %s", phase, sevenDefaultAssistant))
+	} else if state.ClaudeAuthPath != "" || state.ClaudeCredentials.present() {
+		opts.Logger(fmt.Sprintf("%s claude auth is not usable in sprite; run 'claude' inside the sprite to log in (or 'codex login'), then retry. Falling back to %s", phase, sevenDefaultAssistant))
 	}
 
 	if state.CodexAuthPath != "" {
@@ -1085,6 +1107,64 @@ func detectHostClaudeConfig(opts upOptions) string {
 
 	opts.Logger("[seven init] detected host Claude Code config")
 	return configPath
+}
+
+// detectHostClaudeCredentials locates the host's Claude Code OAuth credential
+// store (access + refresh tokens). On macOS this is the login Keychain; on Linux
+// it is ~/.claude/.credentials.json. Syncing this — not just ~/.claude.json —
+// is what keeps Claude usable in the sprite after the host token is refreshed.
+func detectHostClaudeCredentials(opts upOptions) claudeCredentialsSource {
+	if runtime.GOOS == "darwin" {
+		if claudeKeychainHasCredentials() {
+			opts.Logger("[seven init] detected host Claude Code credentials (macOS keychain)")
+			return claudeCredentialsSource{Keychain: true}
+		}
+		return claudeCredentialsSource{}
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return claudeCredentialsSource{}
+	}
+	credPath := filepath.Join(home, ".claude", ".credentials.json")
+	info, err := os.Stat(credPath)
+	if err != nil || info.IsDir() || info.Size() == 0 {
+		return claudeCredentialsSource{}
+	}
+	opts.Logger("[seven init] detected host Claude Code credentials")
+	return claudeCredentialsSource{FilePath: credPath}
+}
+
+// claudeKeychainHasCredentials reports whether the macOS login Keychain holds a
+// Claude Code credentials item. It uses a metadata lookup (no -w), so it does
+// not read the secret and does not trigger a Keychain access prompt.
+func claudeKeychainHasCredentials() bool {
+	for _, svc := range claudeKeychainServices {
+		if err := exec.Command("security", "find-generic-password", "-s", svc).Run(); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// extractClaudeKeychainCredentials reads the Claude Code credentials JSON out of
+// the macOS login Keychain. This may trigger a one-time Keychain access prompt.
+func extractClaudeKeychainCredentials() (string, error) {
+	var lastErr error
+	for _, svc := range claudeKeychainServices {
+		out, err := exec.Command("security", "find-generic-password", "-s", svc, "-w").Output()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if trimmed := strings.TrimSpace(string(out)); trimmed != "" {
+			return trimmed, nil
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no claude credentials found in keychain")
+	}
+	return "", lastErr
 }
 
 func detectHostCodexChatGPTAuth(opts upOptions) string {
@@ -1253,6 +1333,59 @@ func ensureClaudeAuthInSprite(spriteName, hostAuthPath string, opts upOptions) e
 		"-file", copySpec,
 		"--",
 		"sh", "-lc", "install -m 600 /tmp/host-claude-auth.json \"$HOME/.claude.json\" && rm -f /tmp/host-claude-auth.json",
+	}
+	if opts.QuietExternal {
+		_, err := runCmdOutput(spriteBin(), nil, cmdArgs...)
+		return err
+	}
+	return runCmd(spriteBin(), nil, cmdArgs...)
+}
+
+// ensureClaudeCredentialsInSprite copies the host's Claude Code OAuth credential
+// store into the sprite's ~/.claude/.credentials.json. Unlike the config/auth
+// syncs this overwrites rather than merges: the host token is the freshest copy,
+// and we want it to replace any stale token already in the sprite. The source is
+// either a host file (Linux) or extracted from the macOS Keychain.
+func ensureClaudeCredentialsInSprite(spriteName string, src claudeCredentialsSource, opts upOptions) error {
+	if !src.present() {
+		return nil
+	}
+	if err := spriteExec(spriteName, nil, opts.QuietExternal, "sh", "-lc", "command -v claude >/dev/null 2>&1"); err != nil {
+		opts.Logger("[seven init] claude not found in sprite, skipping claude credentials sync")
+		return nil
+	}
+
+	hostPath := src.FilePath
+	if src.Keychain {
+		data, err := extractClaudeKeychainCredentials()
+		if err != nil {
+			return fmt.Errorf("reading claude credentials from keychain: %w", err)
+		}
+		tmpFile, err := os.CreateTemp("", "seven-claude-credentials-*.json")
+		if err != nil {
+			return err
+		}
+		defer os.Remove(tmpFile.Name())
+		if _, err := tmpFile.WriteString(data); err != nil {
+			tmpFile.Close()
+			return err
+		}
+		if err := tmpFile.Chmod(0o600); err != nil {
+			tmpFile.Close()
+			return err
+		}
+		tmpFile.Close()
+		hostPath = tmpFile.Name()
+	}
+
+	opts.Logger("[seven init] syncing claude credentials into sprite")
+	copySpec := hostPath + ":/tmp/host-claude-credentials.json"
+	cmdArgs := []string{
+		"exec",
+		"-s", spriteName,
+		"-file", copySpec,
+		"--",
+		"sh", "-lc", "install -d -m 700 \"$HOME/.claude\" && install -m 600 /tmp/host-claude-credentials.json \"$HOME/.claude/.credentials.json\" && rm -f /tmp/host-claude-credentials.json",
 	}
 	if opts.QuietExternal {
 		_, err := runCmdOutput(spriteBin(), nil, cmdArgs...)
