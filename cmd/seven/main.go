@@ -1129,6 +1129,70 @@ func detectHostCodexConfig(opts upOptions) string {
 	return configPath
 }
 
+// deepMergeJSON merges src into dst recursively. For nested maps both sides
+// are recursed; for everything else src wins. dst is mutated and returned.
+func deepMergeJSON(dst, src map[string]interface{}) map[string]interface{} {
+	for k, srcVal := range src {
+		if dstVal, exists := dst[k]; exists {
+			srcMap, srcIsMap := srcVal.(map[string]interface{})
+			dstMap, dstIsMap := dstVal.(map[string]interface{})
+			if srcIsMap && dstIsMap {
+				dst[k] = deepMergeJSON(dstMap, srcMap)
+				continue
+			}
+		}
+		dst[k] = srcVal
+	}
+	return dst
+}
+
+// mergedJSONForSprite reads the host JSON file and the sprite's existing copy
+// (via spriteReadCmd), deep-merges host values into the sprite's version so
+// that sprite-only keys are preserved, and returns the path to the file that
+// should be copied into the sprite. When there is no existing sprite file or
+// the merge cannot be performed it returns the original hostPath unchanged.
+// If a temporary file is created the returned cleanup func removes it.
+func mergedJSONForSprite(spriteName, hostPath, spriteReadCmd string) (path string, cleanup func(), err error) {
+	hostData, err := os.ReadFile(hostPath)
+	if err != nil {
+		return "", nil, fmt.Errorf("reading host config: %w", err)
+	}
+	var hostJSON map[string]interface{}
+	if err := json.Unmarshal(hostData, &hostJSON); err != nil {
+		return hostPath, nil, nil
+	}
+
+	spriteData, readErr := spriteExecOutput(spriteName, nil, "sh", "-lc", spriteReadCmd)
+	if readErr != nil || strings.TrimSpace(spriteData) == "" {
+		return hostPath, nil, nil
+	}
+
+	var spriteJSON map[string]interface{}
+	if err := json.Unmarshal([]byte(spriteData), &spriteJSON); err != nil {
+		return hostPath, nil, nil
+	}
+
+	merged := deepMergeJSON(spriteJSON, hostJSON)
+
+	data, err := json.MarshalIndent(merged, "", "  ")
+	if err != nil {
+		return hostPath, nil, nil
+	}
+
+	tmpFile, err := os.CreateTemp("", "seven-merged-*.json")
+	if err != nil {
+		return hostPath, nil, nil
+	}
+	if _, writeErr := tmpFile.Write(data); writeErr != nil {
+		tmpFile.Close()
+		os.Remove(tmpFile.Name())
+		return hostPath, nil, nil
+	}
+	tmpFile.Close()
+
+	return tmpFile.Name(), func() { os.Remove(tmpFile.Name()) }, nil
+}
+
 func ensureClaudeConfigInSprite(spriteName, hostConfigPath string, opts upOptions) error {
 	if hostConfigPath == "" {
 		return nil
@@ -1139,7 +1203,16 @@ func ensureClaudeConfigInSprite(spriteName, hostConfigPath string, opts upOption
 	}
 
 	opts.Logger("[seven init] syncing claude config into sprite")
-	copySpec := hostConfigPath + ":/tmp/host-claude-settings.json"
+
+	srcPath, cleanup, err := mergedJSONForSprite(spriteName, hostConfigPath, `cat "$HOME/.claude/settings.json" 2>/dev/null`)
+	if err != nil {
+		return err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	copySpec := srcPath + ":/tmp/host-claude-settings.json"
 	cmdArgs := []string{
 		"exec",
 		"-s", spriteName,
@@ -1164,7 +1237,16 @@ func ensureClaudeAuthInSprite(spriteName, hostAuthPath string, opts upOptions) e
 	}
 
 	opts.Logger("[seven init] syncing claude auth into sprite")
-	copySpec := hostAuthPath + ":/tmp/host-claude-auth.json"
+
+	srcPath, cleanup, err := mergedJSONForSprite(spriteName, hostAuthPath, `cat "$HOME/.claude.json" 2>/dev/null`)
+	if err != nil {
+		return err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	copySpec := srcPath + ":/tmp/host-claude-auth.json"
 	cmdArgs := []string{
 		"exec",
 		"-s", spriteName,
