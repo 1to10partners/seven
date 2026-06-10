@@ -882,6 +882,164 @@ func TestSevenUpNewCreatesNextSiblingAndUpdatesSelection(t *testing.T) {
 	}
 }
 
+func TestSpriteColorStableAndInPalette(t *testing.T) {
+	a := spriteColor("myrepo")
+	if a != spriteColor("myrepo") {
+		t.Fatalf("spriteColor should be stable for the same name")
+	}
+	inPalette := false
+	for _, c := range spriteIdentityPalette {
+		if a == fmt.Sprintf("%d", c) {
+			inPalette = true
+			break
+		}
+	}
+	if !inPalette {
+		t.Fatalf("spriteColor %q not in palette", a)
+	}
+	if spriteColor("myrepo") == spriteColor("myrepo-02") && spriteColor("myrepo-02") == spriteColor("myrepo-03") {
+		t.Fatalf("expected sibling names to spread across colors, got identical colors")
+	}
+}
+
+func TestSiblingSpriteNameForOrdinal(t *testing.T) {
+	cases := map[int]string{1: "base", 2: "base-02", 3: "base-03", 10: "base-10"}
+	for n, want := range cases {
+		if got := siblingSpriteNameForOrdinal("base", n); got != want {
+			t.Fatalf("siblingSpriteNameForOrdinal(base, %d) = %q, want %q", n, got, want)
+		}
+	}
+}
+
+func TestSpriteFamilyMembers(t *testing.T) {
+	listOut := "seven\nseven-02\nseven-03\nother-app\n"
+	got := spriteFamilyMembers("seven", listOut)
+	want := []string{"seven", "seven-02", "seven-03"}
+	if len(got) != len(want) {
+		t.Fatalf("spriteFamilyMembers = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("spriteFamilyMembers[%d] = %q, want %q (full: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestSevenUpOrdinalSelectsSibling(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte("seven\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .sprite: %v", err)
+	}
+	if err := os.WriteFile(state, []byte("seven\n"), 0o644); err != nil {
+		t.Fatalf("failed to write state: %v", err)
+	}
+
+	cmd := exec.Command(testSevenBin, "up", "2", "--assume-logged-in", "--no-tui", "--no-console")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven up 2 failed: %v\n%s", err, output)
+	}
+
+	data, err := os.ReadFile(filepath.Join(repo, ".sprite"))
+	if err != nil {
+		t.Fatalf("expected .sprite file: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "seven-02" {
+		t.Fatalf("expected .sprite to select seven-02, got %q", got)
+	}
+	logData, _ := os.ReadFile(logPath)
+	if !strings.Contains(string(logData), "create seven-02") {
+		t.Fatalf("expected create log for seven-02, got: %s", logData)
+	}
+}
+
+func TestSevenUpConfiguresSpriteIdentity(t *testing.T) {
+	repo := t.TempDir()
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	spriteName := "existing-sprite"
+	if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte(spriteName+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .sprite: %v", err)
+	}
+	if err := os.WriteFile(state, []byte(spriteName+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write state: %v", err)
+	}
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven up failed: %v\n%s", err, output)
+	}
+
+	logData, _ := os.ReadFile(logPath)
+	log := string(logData)
+	if !strings.Contains(log, ".seven-sprite-id.sh") {
+		t.Fatalf("expected sprite identity setup in log, got: %s", log)
+	}
+	if !strings.Contains(log, "SEVEN_SPRITE_NAME="+spriteName) {
+		t.Fatalf("expected identity env with sprite name, got: %s", log)
+	}
+}
+
+func TestSevenLsListsFamily(t *testing.T) {
+	repo := t.TempDir()
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte("seven\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .sprite: %v", err)
+	}
+	if err := os.WriteFile(state, []byte("seven\nseven-02\nother-app\n"), 0o644); err != nil {
+		t.Fatalf("failed to write state: %v", err)
+	}
+
+	cmd := exec.Command(testSevenBin, "ls")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"NO_COLOR=1",
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven ls failed: %v\n%s", err, output)
+	}
+	out := string(output)
+	if !strings.Contains(out, "sprite family for seven") {
+		t.Fatalf("expected family header, got: %s", out)
+	}
+	if !strings.Contains(out, "seven (main)") {
+		t.Fatalf("expected main sprite labeled, got: %s", out)
+	}
+	if !strings.Contains(out, "seven-02") {
+		t.Fatalf("expected sibling listed, got: %s", out)
+	}
+	if strings.Contains(out, "other-app") {
+		t.Fatalf("ls should not list unrelated sprites, got: %s", out)
+	}
+	if !strings.Contains(out, "*") {
+		t.Fatalf("expected selected marker, got: %s", out)
+	}
+}
+
 func TestSevenUpSpriteUsesExplicitNameAndSelectsIt(t *testing.T) {
 	repo := createTempRepo(t)
 	state, logPath, cleanup := createFakeSprite(t)

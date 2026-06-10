@@ -48,6 +48,18 @@ On first run, `seven up` will prompt you to run `sprite login`, then create the 
 
 Once inside the sprite, cd into your folder and start your favorite assistant. The following come pre-installed: `claude`, `codex`, `cursor-agent`, and `gemini-cli`.
 
+### Running multiple sprites
+Each sprite is a fully isolated microVM, so running one assistant session per sprite is a clean alternative to git worktrees. `seven up` opens the main sprite; siblings are numbered:
+
+```sh
+seven up          # main sprite (#1)
+seven up --new    # create the next sibling (#2, #3, …) and select it
+seven up 2        # reopen sibling #2
+seven ls          # list this repo's sprite family and which one is selected
+```
+
+To avoid confusion when switching between consoles, each sprite gets a **color-coded shell prompt** (bash, zsh, and fish) plus a one-line banner naming it on entry. The color is derived from the sprite name, so a given sprite always shows the same color and siblings stay visually distinct.
+
 ### Uninstall
 Remove the installed binary (defaults to `~/.local/bin`):
 
@@ -89,7 +101,8 @@ goreleaser release --snapshot --clean
 ```
 
 ## Features
-- **Core CLI:** `seven init`, `seven up`, `seven destroy`, `seven status`.
+- **Core CLI:** `seven init`, `seven up`, `seven destroy`, `seven status`, `seven ls`.
+- **Multiple sprites:** `seven up --new` / `seven up N` to run one assistant session per isolated sprite, with a color-coded prompt per sprite.
 - **Bootstrap:** resolve sprite name, create/reuse sprite, clone repo when possible, setup git.
 - **TUI:** minimal Bubbletea UX.
 - **Packaging:** GitHub Releases + curl installer (primary). No package managers yet.
