@@ -88,8 +88,18 @@ goreleaser check
 goreleaser release --snapshot --clean
 ```
 
+### Install gstack
+[gstack](https://github.com/garrytan/gstack) is a Claude Code skill toolkit that lives outside the repo (in `~/.claude/skills/`), so each fresh sprite needs its own copy. Pass `--gstack` to install it during bootstrap:
+
+```sh
+seven up --gstack
+```
+
+This ensures `bun` (its dependency) is present in the sprite, then runs gstack's documented `git clone … && ./setup`. The skills only run inside Claude Code, so seven warns if Claude isn't the resolved assistant, but installs regardless.
+
 ## Features
 - **Core CLI:** `seven init`, `seven up`, `seven destroy`, `seven status`.
+- **gstack:** optional `--gstack` install of the gstack skill toolkit into the sprite.
 - **Bootstrap:** resolve sprite name, create/reuse sprite, clone repo when possible, setup git.
 - **TUI:** minimal Bubbletea UX.
 - **Packaging:** GitHub Releases + curl installer (primary). No package managers yet.

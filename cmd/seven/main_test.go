@@ -91,6 +91,80 @@ func TestSevenUpCreatesSpriteAndWritesFile(t *testing.T) {
 	}
 }
 
+// runSevenUpForLog runs `seven up` with the given extra flags/env against a fake
+// sprite and returns the captured sprite log.
+func runSevenUpForLog(t *testing.T, repo, state, logPath string, extraEnv []string, args ...string) string {
+	t.Helper()
+	cmdArgs := append([]string{"up", "--assume-logged-in", "--no-tui"}, args...)
+	cmd := exec.Command(testSevenBin, cmdArgs...)
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	cmd.Env = append(cmd.Env, extraEnv...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven up failed: %v\n%s", err, output)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	return string(logData)
+}
+
+func TestSevenUpGstackInstallsWhenFlagSet(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	log := runSevenUpForLog(t, repo, state, logPath, nil, "--gstack")
+	if !strings.Contains(log, "garrytan/gstack") {
+		t.Fatalf("expected gstack clone in log, got: %s", log)
+	}
+	if strings.Contains(log, "bun.sh/install") {
+		t.Fatalf("expected no bun install when bun present, got: %s", log)
+	}
+}
+
+func TestSevenUpSkipsGstackWithoutFlag(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	log := runSevenUpForLog(t, repo, state, logPath, nil)
+	if strings.Contains(log, "garrytan/gstack") {
+		t.Fatalf("expected no gstack install without --gstack, got: %s", log)
+	}
+}
+
+func TestSevenUpGstackInstallsBunWhenMissing(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	log := runSevenUpForLog(t, repo, state, logPath, []string{"SPRITE_EXEC_BUN_MISSING=1"}, "--gstack")
+	if !strings.Contains(log, "bun.sh/install") {
+		t.Fatalf("expected bun install when bun missing, got: %s", log)
+	}
+	if !strings.Contains(log, "garrytan/gstack") {
+		t.Fatalf("expected gstack clone after bun install, got: %s", log)
+	}
+}
+
+func TestSevenUpGstackSkipsWhenAlreadyPresent(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	log := runSevenUpForLog(t, repo, state, logPath, []string{"SPRITE_EXEC_GSTACK_PRESENT=1"}, "--gstack")
+	if strings.Contains(log, "garrytan/gstack") {
+		t.Fatalf("expected gstack clone to be skipped when already installed, got: %s", log)
+	}
+}
+
 func TestSevenUpSkipsLoginWhenSpriteExists(t *testing.T) {
 	repo := t.TempDir()
 	state, logPath, cleanup := createFakeSprite(t)
@@ -1216,6 +1290,18 @@ case "$cmd" in
         fi
         if [ -n "${SPRITE_EXEC_CLAUDE_AUTH_STATUS_EXIT:-}" ]; then
           exit "$SPRITE_EXEC_CLAUDE_AUTH_STATUS_EXIT"
+        fi
+        exit 0
+        ;;
+      *skills/gstack/.git*)
+        if [ "${SPRITE_EXEC_GSTACK_PRESENT:-}" = "1" ]; then
+          exit 0
+        fi
+        exit 1
+        ;;
+      *"command -v bun"*)
+        if [ "${SPRITE_EXEC_BUN_MISSING:-}" = "1" ]; then
+          exit 1
         fi
         exit 0
         ;;
