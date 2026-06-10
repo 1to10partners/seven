@@ -788,20 +788,17 @@ func spriteFamilyBase(name string) string {
 }
 
 func nextSiblingSpriteName(base string, listOut string) string {
-	pattern := regexp.MustCompile(`(^|[^[:alnum:]_])(` + regexp.QuoteMeta(base) + `(?:-[0-9]{2})?)([^[:alnum:]_]|$)`)
-	matches := pattern.FindAllStringSubmatch(listOut, -1)
+	// Reuse the same field-based family scan that `seven list` uses so the two
+	// agree on which sprites exist. An earlier regex approach consumed the
+	// newline between adjacent names as a match boundary, so a family of just
+	// "<base>" + "<base>-02" only matched the main sprite and `--new` collided
+	// with the existing -02 sibling instead of allocating -03.
+	//
 	// Start at 1 (the main sprite) so the first sibling is always -02, keeping
 	// `--new` consistent with `seven up N` and `seven list`.
 	maxOrdinal := 1
-	for _, match := range matches {
-		if len(match) < 3 {
-			continue
-		}
-		ordinal, ok := spriteFamilyOrdinal(base, match[2])
-		if !ok {
-			continue
-		}
-		if ordinal > maxOrdinal {
+	for _, name := range spriteFamilyMembers(base, listOut) {
+		if ordinal, ok := spriteFamilyOrdinal(base, name); ok && ordinal > maxOrdinal {
 			maxOrdinal = ordinal
 		}
 	}

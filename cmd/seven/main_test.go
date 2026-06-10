@@ -1350,6 +1350,51 @@ func TestSpriteColorStableAndInPalette(t *testing.T) {
 	}
 }
 
+func TestNextSiblingSpriteName(t *testing.T) {
+	cases := []struct {
+		name    string
+		base    string
+		listOut string
+		want    string
+	}{
+		{
+			// Regression: main + one adjacent sibling is the common case. A prior
+			// regex implementation consumed the newline between them as a match
+			// boundary, so only the main sprite matched and --new returned the
+			// existing -02 (wrecking it) instead of allocating -03.
+			name:    "main plus adjacent sibling",
+			base:    "soclimmo",
+			listOut: "soclimmo\nsoclimmo-02\n",
+			want:    "soclimmo-03",
+		},
+		{
+			name:    "main only",
+			base:    "soclimmo",
+			listOut: "soclimmo\n",
+			want:    "soclimmo-02",
+		},
+		{
+			name:    "no family members yet",
+			base:    "soclimmo",
+			listOut: "",
+			want:    "soclimmo-02",
+		},
+		{
+			name:    "gaps and unrelated families ignored",
+			base:    "soclimmo",
+			listOut: "soclimmo\nsoclimmo-04\nother\nother-02\n",
+			want:    "soclimmo-05",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nextSiblingSpriteName(tc.base, tc.listOut); got != tc.want {
+				t.Fatalf("nextSiblingSpriteName(%q, %q) = %q, want %q", tc.base, tc.listOut, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSiblingSpriteNameForOrdinal(t *testing.T) {
 	cases := map[int]string{1: "base", 2: "base-02", 3: "base-03", 10: "base-10"}
 	for n, want := range cases {
