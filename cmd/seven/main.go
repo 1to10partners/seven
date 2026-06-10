@@ -442,10 +442,14 @@ func runUp(opts upOptions) (upResult, error) {
 		if err := writeSpriteFile(name); err != nil {
 			return upResult{}, err
 		}
-		// Git identity is configured once at creation; re-syncing on every up is
-		// redundant and has been observed to hang against an existing sprite.
+		// Git identity and assistant credentials (claude/codex, plus gh) are all
+		// set up once at creation. Re-syncing on every up was slow (per-call
+		// sprite-exec overhead adds up across config + auth for both assistants)
+		// and unnecessary for an established sprite. If a host token has rotated
+		// and the sprite copy is stale, run `claude` or `codex login` inside the
+		// sprite to re-auth — same recovery path as for gh.
 		assistantState := detectHostAssistantState(opts)
-		assistantState = syncHostAssistantState(name, assistantState, "[seven up]", opts)
+		assistantState.PreferredAssistant = resolvePreferredAssistantInSprite(name, assistantState, "[seven up]", opts)
 		if err := configureConsoleBootstrapInSprite(name, spriteFamilyBase(name), assistantState.PreferredAssistant, opts); err != nil {
 			opts.Logger(fmt.Sprintf("[seven up] console bootstrap setup failed: %v", err))
 		}
@@ -507,10 +511,14 @@ func runInit(opts upOptions) (upResult, error) {
 		if err := writeSpriteFile(name); err != nil {
 			return upResult{}, err
 		}
-		// Git identity is configured once at creation; re-syncing on every up is
-		// redundant and has been observed to hang against an existing sprite.
+		// Git identity and assistant credentials (claude/codex, plus gh) are all
+		// set up once at creation. Re-syncing on every up was slow (per-call
+		// sprite-exec overhead adds up across config + auth for both assistants)
+		// and unnecessary for an established sprite. If a host token has rotated
+		// and the sprite copy is stale, run `claude` or `codex login` inside the
+		// sprite to re-auth — same recovery path as for gh.
 		assistantState := detectHostAssistantState(opts)
-		assistantState = syncHostAssistantState(name, assistantState, "[seven init]", opts)
+		assistantState.PreferredAssistant = resolvePreferredAssistantInSprite(name, assistantState, "[seven init]", opts)
 		if err := configureConsoleBootstrapInSprite(name, spriteFamilyBase(name), assistantState.PreferredAssistant, opts); err != nil {
 			opts.Logger(fmt.Sprintf("[seven init] console bootstrap setup failed: %v", err))
 		}
