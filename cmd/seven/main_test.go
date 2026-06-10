@@ -130,6 +130,20 @@ func TestSevenUpGstackInstallsWhenFlagSet(t *testing.T) {
 	}
 }
 
+func TestSevenUpGstackInstallsChromiumSystemDeps(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	// gstack's ./setup downloads the Chromium binary but not the OS shared
+	// libraries it links against, so on a minimal sprite image the browser
+	// exits 127 at launch. seven must install those deps before ./setup.
+	log := runSevenUpForLog(t, repo, state, logPath, nil, "--gstack")
+	if !strings.Contains(log, "playwright install-deps chromium") {
+		t.Fatalf("expected Chromium system-deps install in log, got: %s", log)
+	}
+}
+
 func TestSevenUpSkipsGstackWithoutFlag(t *testing.T) {
 	repo := createTempRepo(t)
 	state, logPath, cleanup := createFakeSprite(t)
