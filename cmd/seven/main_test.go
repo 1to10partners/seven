@@ -294,6 +294,100 @@ func TestSevenUpSkipsGitIdentitySyncWhenSpriteExists(t *testing.T) {
 	}
 }
 
+func TestSevenUpSkipsAssistantAuthSyncWhenSpriteExists(t *testing.T) {
+	// Claude and codex credentials are synced once at creation, mirroring how
+	// `gh` auth is bootstrapped. Re-syncing on every up against an existing
+	// sprite was slow (per-call sprite-exec overhead across config + auth for
+	// both assistants) and the source of a long pause after the v1.0.1 unfreeze.
+	repo := t.TempDir()
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	spriteName := "existing-sprite"
+	if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte(spriteName+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .sprite: %v", err)
+	}
+	if err := os.WriteFile(state, []byte(spriteName+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write state: %v", err)
+	}
+
+	fakeHome := t.TempDir()
+	claudeDir := filepath.Join(fakeHome, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatalf("failed to create fake claude dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeHome, ".claude.json"), []byte(`{"oauthAccount":{"emailAddress":"test@example.com"}}`), 0o600); err != nil {
+		t.Fatalf("failed to write fake claude auth file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{"theme":"dark-ansi"}`), 0o600); err != nil {
+		t.Fatalf("failed to write fake claude config file: %v", err)
+	}
+	codexDir := filepath.Join(fakeHome, ".codex")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatalf("failed to create fake codex dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(codexDir, "auth.json"), []byte(`{"OPENAI_API_KEY":null,"tokens":{"id_token":"x"}}`), 0o600); err != nil {
+		t.Fatalf("failed to write fake codex auth file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(codexDir, "config.toml"), []byte("approval_policy = \"never\"\n"), 0o600); err != nil {
+		t.Fatalf("failed to write fake codex config: %v", err)
+	}
+
+	binDir := t.TempDir()
+	claudeScript := `#!/bin/sh
+if [ "$1" = "auth" ] && [ "$2" = "status" ] && [ "$3" = "--json" ]; then
+  echo '{"loggedIn":true,"authMethod":"oauth","apiProvider":"firstParty"}'
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(claudeScript), 0o755); err != nil {
+		t.Fatalf("failed to write fake claude: %v", err)
+	}
+	codexScript := `#!/bin/sh
+if [ "$1" = "login" ] && [ "$2" = "status" ]; then
+  echo "Logged in using ChatGPT"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte(codexScript), 0o755); err != nil {
+		t.Fatalf("failed to write fake codex: %v", err)
+	}
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+fakeHome,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"PATH="+binDir+string(os.PathListSeparator)+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		`SPRITE_EXEC_CLAUDE_AUTH_STATUS_JSON={"loggedIn":true}`,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven up failed: %v\n%s", err, output)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	log := string(logData)
+	for _, banned := range []string{
+		"syncing claude config into sprite",
+		"syncing claude auth into sprite",
+		"syncing claude credentials into sprite",
+		"syncing codex config into sprite",
+		"syncing codex auth into sprite",
+	} {
+		if strings.Contains(log, banned) {
+			t.Fatalf("expected no %q for existing sprite, got: %s", banned, log)
+		}
+	}
+}
+
 func TestSevenInitClonesIntoRepoBaseDirForSibling(t *testing.T) {
 	// A sibling sprite (myproj-02) should clone the repo into the family base
 	// directory (myproj), not into a directory named after the sprite.
