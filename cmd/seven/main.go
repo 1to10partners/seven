@@ -6,10 +6,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -33,6 +35,7 @@ type upOptions struct {
 	NewSprite      bool
 	ResolvedName   string
 	InstallGstack  bool
+	SiblingOrdinal int
 }
 
 type spriteNameInfo struct {
@@ -58,12 +61,18 @@ var spriteCurrentVersionPattern = regexp.MustCompile(`(?im)^Current(?:\s+client)
 var spriteSuffixRe = regexp.MustCompile(`^(.*)-([0-9]{2})$`)
 
 const (
-	sevenConsoleHookPath   = "$HOME/.seven-console-hook.sh"
-	sevenConsoleMarkerPath = "$HOME/.seven-console-once"
-	sevenDefaultAssistant  = "codex"
-	gstackRepoURL          = "https://github.com/garrytan/gstack.git"
-	gstackSkillDir         = "$HOME/.claude/skills/gstack"
+	sevenConsoleHookPath    = "$HOME/.seven-console-hook.sh"
+	sevenConsoleMarkerPath  = "$HOME/.seven-console-once"
+	sevenSpriteIdentityPath = "$HOME/.seven-sprite-id.sh"
+	sevenDefaultAssistant   = "codex"
+	gstackRepoURL           = "https://github.com/garrytan/gstack.git"
+	gstackSkillDir          = "$HOME/.claude/skills/gstack"
 )
+
+// spriteIdentityPalette holds distinct 256-color codes used to tint each
+// sprite's prompt/banner. The color is chosen by hashing the sprite name so a
+// given sprite always renders in the same color across sessions.
+var spriteIdentityPalette = []int{39, 208, 170, 118, 213, 154, 220, 45, 201, 99}
 
 var ansiEscapeRe = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
 
@@ -85,6 +94,8 @@ func main() {
 		cmdDestroy(os.Args[2:])
 	case "status":
 		cmdStatus(os.Args[2:])
+	case "list", "ls":
+		cmdList(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -100,16 +111,18 @@ func usage() {
 	fmt.Println()
 	fmt.Println("Usage:")
 	fmt.Println("  seven init [--assume-logged-in] [--new] [--sprite name] [--gstack]")
-	fmt.Println("  seven up [--assume-logged-in] [--new] [--sprite name] [--no-console] [--no-tui] [--gstack]")
+	fmt.Println("  seven up [N] [--assume-logged-in] [--new] [--sprite name] [--no-console] [--no-tui] [--gstack]")
 	fmt.Println("  seven destroy [--sprite name]")
 	fmt.Println("  seven status")
+	fmt.Println("  seven list")
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  version  Show version")
 	fmt.Println("  init     One-time setup (login, create sprite, clone repo)")
-	fmt.Println("  up       Create or reuse the selected sprite, or create a new sibling")
+	fmt.Println("  up       Create or reuse a sprite. Pass N to open sibling #N (1 = main), or --new for the next one")
 	fmt.Println("  destroy  Destroy the selected sprite, or a specific sprite via --sprite")
 	fmt.Println("  status   Show sprite status for this repo")
+	fmt.Println("  list     List this repo's sprite family and which one is selected (alias: ls)")
 }
 
 var version = "dev"
@@ -126,9 +139,28 @@ func cmdUp(args []string) {
 	newSprite := fs.Bool("new", false, "create and select a new sibling sprite")
 	spriteName := fs.String("sprite", "", "use a specific sprite name")
 	gstack := fs.Bool("gstack", false, "install gstack (github.com/garrytan/gstack) into the sprite")
+
+	// An optional leading number (e.g. "seven up 2") selects sibling #N. It must
+	// come first so it is never confused with a flag value like "--sprite 2".
+	ordinal := 0
+	if len(args) > 0 {
+		if n, err := strconv.Atoi(args[0]); err == nil {
+			if n < 1 {
+				fmt.Fprintf(os.Stderr, "seven up failed: sprite number must be a positive integer, got %q\n", args[0])
+				os.Exit(1)
+			}
+			ordinal = n
+			args = args[1:]
+		}
+	}
+
 	_ = fs.Parse(args)
 	if *newSprite && strings.TrimSpace(*spriteName) != "" {
 		fmt.Fprintln(os.Stderr, "seven up failed: --new and --sprite cannot be used together")
+		os.Exit(1)
+	}
+	if ordinal > 0 && (*newSprite || strings.TrimSpace(*spriteName) != "") {
+		fmt.Fprintln(os.Stderr, "seven up failed: sprite number cannot be combined with --new or --sprite")
 		os.Exit(1)
 	}
 
@@ -142,6 +174,7 @@ func cmdUp(args []string) {
 		SpriteName:     strings.TrimSpace(*spriteName),
 		NewSprite:      *newSprite,
 		InstallGstack:  *gstack,
+		SiblingOrdinal: ordinal,
 	}
 	if shouldUseTUI {
 		res, err := runUpWithTUI(opts)
@@ -302,6 +335,58 @@ func cmdStatus(args []string) {
 
 	fmt.Printf("sprite: %s (from %s)\n", name, origin)
 	fmt.Println("status: missing")
+}
+
+func cmdList(args []string) {
+	fs := flag.NewFlagSet("ls", flag.ExitOnError)
+	_ = fs.Parse(args)
+
+	info, err := resolveSpriteName()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to resolve sprite name: %v\n", err)
+		os.Exit(1)
+	}
+	if err := ensureSpriteCLI(); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	listOut, err := spriteList()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sprite list failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	base := info.Name
+	if info.FromFile {
+		base = spriteFamilyBase(info.Name)
+	}
+	selected := info.Name
+
+	members := spriteFamilyMembers(base, listOut)
+	fmt.Printf("sprite family for %s:\n", base)
+	if len(members) == 0 {
+		fmt.Println("  (none yet — run 'seven up' to create the main sprite)")
+		return
+	}
+	for _, name := range members {
+		ordinal, _ := spriteFamilyOrdinal(base, name)
+		number := ordinal
+		if number == 0 {
+			number = 1
+		}
+		marker := " "
+		if name == selected {
+			marker = "*"
+		}
+		label := name
+		if ordinal == 0 {
+			label = name + " (main)"
+		}
+		styled := lipgloss.NewStyle().Foreground(lipgloss.Color(spriteColor(name))).Render(label)
+		fmt.Printf("  %s %d  %s\n", marker, number, styled)
+	}
+	fmt.Println()
+	fmt.Println("open:  seven up <number>    new:  seven up --new")
 }
 
 func runUp(opts upOptions) (upResult, error) {
@@ -586,6 +671,19 @@ func resolveTargetSpriteName(opts upOptions) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
+	if opts.SiblingOrdinal > 0 {
+		base := info.Name
+		if info.FromFile {
+			base = spriteFamilyBase(info.Name)
+		}
+		name := siblingSpriteNameForOrdinal(base, opts.SiblingOrdinal)
+		if err := validateSpriteName(name); err != nil {
+			return "", err
+		}
+		return name, nil
+	}
+
 	if !opts.NewSprite {
 		return info.Name, nil
 	}
@@ -599,6 +697,47 @@ func resolveTargetSpriteName(opts upOptions) (string, error) {
 		return "", err
 	}
 	return nextSiblingSpriteName(base, listOut), nil
+}
+
+// siblingSpriteNameForOrdinal maps a 1-based family ordinal to a sprite name:
+// 1 is the main sprite (the bare base), N>=2 is "<base>-0N" to match the
+// sibling naming produced by nextSiblingSpriteName.
+func siblingSpriteNameForOrdinal(base string, n int) string {
+	if n <= 1 {
+		return base
+	}
+	return fmt.Sprintf("%s-%02d", base, n)
+}
+
+// spriteColor returns a stable 256-color code (as a string) for a sprite name,
+// chosen by hashing the name into spriteIdentityPalette.
+func spriteColor(name string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(name))
+	return strconv.Itoa(spriteIdentityPalette[int(h.Sum32())%len(spriteIdentityPalette)])
+}
+
+// spriteFamilyMembers returns the names of sprites in the family rooted at base
+// that appear in listOut, sorted by ordinal (main first).
+func spriteFamilyMembers(base, listOut string) []string {
+	seen := map[string]int{}
+	scanner := bufio.NewScanner(strings.NewReader(listOut))
+	for scanner.Scan() {
+		for _, field := range strings.Fields(scanner.Text()) {
+			if _, ok := seen[field]; ok {
+				continue
+			}
+			if ordinal, ok := spriteFamilyOrdinal(base, field); ok {
+				seen[field] = ordinal
+			}
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool { return seen[names[i]] < seen[names[j]] })
+	return names
 }
 
 func spriteFamilyBase(name string) string {
@@ -782,6 +921,10 @@ func parseSpriteUpgradeCheckOutput(out string) (latest, current string, ok bool)
 }
 
 func configureConsoleBootstrapInSprite(spriteName, repoDir, assistant string, opts upOptions) error {
+	if err := configureSpriteIdentity(spriteName, opts); err != nil {
+		opts.Logger(fmt.Sprintf("[seven init] sprite identity setup failed: %v", err))
+	}
+
 	if repoDir == "" || assistant == "" {
 		return nil
 	}
@@ -893,6 +1036,77 @@ git clone --single-branch --depth 1 ` + gstackRepoURL + ` "` + gstackSkillDir + 
 cd "` + gstackSkillDir + `"
 ./setup`
 	return spriteExec(spriteName, nil, opts.QuietExternal, "sh", "-lc", install)
+}
+
+// configureSpriteIdentity installs a persistent, color-coded shell prompt and a
+// one-line banner inside the sprite so it is obvious which sprite a console
+// belongs to. The color is derived from the sprite name (see spriteColor) and is
+// stable across sessions, so sibling sprites stay visually distinct. Snippets are
+// written for bash, zsh, and fish and sourced from the usual rc files.
+func configureSpriteIdentity(spriteName string, opts upOptions) error {
+	if spriteName == "" {
+		return nil
+	}
+	color := spriteColor(spriteName)
+	opts.Logger(fmt.Sprintf("[seven init] configuring sprite identity prompt: %s", spriteName))
+	env := []string{"SEVEN_SPRITE_NAME=" + spriteName + ",SEVEN_SPRITE_COLOR=" + color}
+	idPath := sevenSpriteIdentityPath
+	cmd := `set -e
+{
+  printf 'SEVEN_SPRITE_NAME=%s\n' "$SEVEN_SPRITE_NAME"
+  printf 'SEVEN_SPRITE_COLOR=%s\n' "$SEVEN_SPRITE_COLOR"
+  cat <<'EOF'
+# seven sprite identity: colored prompt + banner
+case "$-" in
+  *i*)
+    if [ -z "${SEVEN_SPRITE_PROMPT_SET:-}" ]; then
+      SEVEN_SPRITE_PROMPT_SET=1
+      __seven_c="${SEVEN_SPRITE_COLOR:-7}"
+      __seven_n="${SEVEN_SPRITE_NAME:-sprite}"
+      if [ -n "${ZSH_VERSION:-}" ]; then
+        PROMPT="%{$(printf '\033[1;38;5;%sm' "$__seven_c")%}[$__seven_n]%{$(printf '\033[0m')%} $PROMPT"
+      elif [ -n "${BASH_VERSION:-}" ]; then
+        PS1="\[$(printf '\033[1;38;5;%sm' "$__seven_c")\][$__seven_n]\[$(printf '\033[0m')\] $PS1"
+      fi
+      printf '\033[1;38;5;%sm# sprite: %s\033[0m\n' "$__seven_c" "$__seven_n"
+    fi
+    ;;
+esac
+EOF
+} > "` + idPath + `"
+chmod 600 "` + idPath + `"
+
+install -d -m 700 "$HOME/.config/fish/conf.d"
+{
+  printf 'set -g __seven_sprite_name %s\n' "$SEVEN_SPRITE_NAME"
+  printf 'set -g __seven_sprite_color %s\n' "$SEVEN_SPRITE_COLOR"
+  cat <<'EOF'
+status is-interactive; or exit 0
+if not functions -q __seven_orig_fish_prompt
+  if functions -q fish_prompt
+    functions -c fish_prompt __seven_orig_fish_prompt
+  end
+end
+function fish_prompt
+  printf '\033[1;38;5;%sm[%s]\033[0m ' $__seven_sprite_color $__seven_sprite_name
+  if functions -q __seven_orig_fish_prompt
+    __seven_orig_fish_prompt
+  end
+end
+if not set -q __seven_sprite_banner_shown
+  set -g __seven_sprite_banner_shown 1
+  printf '\033[1;38;5;%sm# sprite: %s\033[0m\n' $__seven_sprite_color $__seven_sprite_name
+end
+EOF
+} > "$HOME/.config/fish/conf.d/seven-sprite-id.fish"
+chmod 600 "$HOME/.config/fish/conf.d/seven-sprite-id.fish"
+
+for rc in "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.zprofile"; do
+  touch "$rc"
+  grep -Fqx '[ -f "` + idPath + `" ] && . "` + idPath + `"' "$rc" || printf '\n%s\n' '[ -f "` + idPath + `" ] && . "` + idPath + `"' >> "$rc"
+done
+`
+	return spriteExec(spriteName, env, opts.QuietExternal, "sh", "-lc", cmd)
 }
 
 func spriteList() (string, error) {
