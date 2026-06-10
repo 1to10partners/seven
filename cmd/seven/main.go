@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,7 +52,24 @@ type hostAssistantState struct {
 	CodexAuthPath      string
 	ClaudeConfigPath   string
 	ClaudeAuthPath     string
+	ClaudeCredentials  claudeCredentialsSource
 }
+
+// claudeCredentialsSource describes where the host's Claude Code OAuth
+// credentials (access + refresh tokens) live. On Linux they are a file; on
+// macOS they live in the login Keychain and must be extracted.
+type claudeCredentialsSource struct {
+	FilePath string // non-empty: copy this file into the sprite
+	Keychain bool   // true: extract from the macOS login Keychain
+}
+
+func (c claudeCredentialsSource) present() bool {
+	return c.FilePath != "" || c.Keychain
+}
+
+// claudeKeychainServices are the macOS Keychain service names Claude Code has
+// used for its credentials item, newest first.
+var claudeKeychainServices = []string{"Claude Code-credentials", "claude-code"}
 
 var spritePath string
 var spriteNamePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -1238,6 +1256,7 @@ func detectHostAssistantState(opts upOptions) hostAssistantState {
 	}
 	state.ClaudeAuthPath = detectHostClaudeAuth(opts)
 	state.ClaudeConfigPath = detectHostClaudeConfig(opts)
+	state.ClaudeCredentials = detectHostClaudeCredentials(opts)
 	state.CodexAuthPath = detectHostCodexChatGPTAuth(opts)
 	state.CodexConfigPath = detectHostCodexConfig(opts)
 
@@ -1258,6 +1277,9 @@ func syncHostAssistantState(spriteName string, state hostAssistantState, phase s
 	if err := ensureClaudeAuthInSprite(spriteName, state.ClaudeAuthPath, opts); err != nil {
 		opts.Logger(fmt.Sprintf("%s claude auth setup failed: %v", phase, err))
 	}
+	if err := ensureClaudeCredentialsInSprite(spriteName, state.ClaudeCredentials, opts); err != nil {
+		opts.Logger(fmt.Sprintf("%s claude credentials setup failed: %v", phase, err))
+	}
 	if err := ensureCodexConfigInSprite(spriteName, state.CodexConfigPath, opts); err != nil {
 		opts.Logger(fmt.Sprintf("%s codex config setup failed: %v", phase, err))
 	}
@@ -1274,8 +1296,8 @@ func resolvePreferredAssistantInSprite(spriteName string, state hostAssistantSta
 		opts.Logger(fmt.Sprintf("%s claude auth validation failed: %v", phase, err))
 	} else if loggedIn {
 		return "claude"
-	} else if state.ClaudeAuthPath != "" {
-		opts.Logger(fmt.Sprintf("%s claude auth is not usable in sprite; falling back to %s", phase, sevenDefaultAssistant))
+	} else if state.ClaudeAuthPath != "" || state.ClaudeCredentials.present() {
+		opts.Logger(fmt.Sprintf("%s claude auth is not usable in sprite; run 'claude' inside the sprite to log in (or 'codex login'), then retry. Falling back to %s", phase, sevenDefaultAssistant))
 	}
 
 	if state.CodexAuthPath != "" {
@@ -1353,6 +1375,64 @@ func detectHostClaudeConfig(opts upOptions) string {
 	return configPath
 }
 
+// detectHostClaudeCredentials locates the host's Claude Code OAuth credential
+// store (access + refresh tokens). On macOS this is the login Keychain; on Linux
+// it is ~/.claude/.credentials.json. Syncing this — not just ~/.claude.json —
+// is what keeps Claude usable in the sprite after the host token is refreshed.
+func detectHostClaudeCredentials(opts upOptions) claudeCredentialsSource {
+	if runtime.GOOS == "darwin" {
+		if claudeKeychainHasCredentials() {
+			opts.Logger("[seven init] detected host Claude Code credentials (macOS keychain)")
+			return claudeCredentialsSource{Keychain: true}
+		}
+		return claudeCredentialsSource{}
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return claudeCredentialsSource{}
+	}
+	credPath := filepath.Join(home, ".claude", ".credentials.json")
+	info, err := os.Stat(credPath)
+	if err != nil || info.IsDir() || info.Size() == 0 {
+		return claudeCredentialsSource{}
+	}
+	opts.Logger("[seven init] detected host Claude Code credentials")
+	return claudeCredentialsSource{FilePath: credPath}
+}
+
+// claudeKeychainHasCredentials reports whether the macOS login Keychain holds a
+// Claude Code credentials item. It uses a metadata lookup (no -w), so it does
+// not read the secret and does not trigger a Keychain access prompt.
+func claudeKeychainHasCredentials() bool {
+	for _, svc := range claudeKeychainServices {
+		if err := exec.Command("security", "find-generic-password", "-s", svc).Run(); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// extractClaudeKeychainCredentials reads the Claude Code credentials JSON out of
+// the macOS login Keychain. This may trigger a one-time Keychain access prompt.
+func extractClaudeKeychainCredentials() (string, error) {
+	var lastErr error
+	for _, svc := range claudeKeychainServices {
+		out, err := exec.Command("security", "find-generic-password", "-s", svc, "-w").Output()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if trimmed := strings.TrimSpace(string(out)); trimmed != "" {
+			return trimmed, nil
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no claude credentials found in keychain")
+	}
+	return "", lastErr
+}
+
 func detectHostCodexChatGPTAuth(opts upOptions) string {
 	if _, err := exec.LookPath("codex"); err != nil {
 		return ""
@@ -1395,6 +1475,70 @@ func detectHostCodexConfig(opts upOptions) string {
 	return configPath
 }
 
+// deepMergeJSON merges src into dst recursively. For nested maps both sides
+// are recursed; for everything else src wins. dst is mutated and returned.
+func deepMergeJSON(dst, src map[string]interface{}) map[string]interface{} {
+	for k, srcVal := range src {
+		if dstVal, exists := dst[k]; exists {
+			srcMap, srcIsMap := srcVal.(map[string]interface{})
+			dstMap, dstIsMap := dstVal.(map[string]interface{})
+			if srcIsMap && dstIsMap {
+				dst[k] = deepMergeJSON(dstMap, srcMap)
+				continue
+			}
+		}
+		dst[k] = srcVal
+	}
+	return dst
+}
+
+// mergedJSONForSprite reads the host JSON file and the sprite's existing copy
+// (via spriteReadCmd), deep-merges host values into the sprite's version so
+// that sprite-only keys are preserved, and returns the path to the file that
+// should be copied into the sprite. When there is no existing sprite file or
+// the merge cannot be performed it returns the original hostPath unchanged.
+// If a temporary file is created the returned cleanup func removes it.
+func mergedJSONForSprite(spriteName, hostPath, spriteReadCmd string) (path string, cleanup func(), err error) {
+	hostData, err := os.ReadFile(hostPath)
+	if err != nil {
+		return "", nil, fmt.Errorf("reading host config: %w", err)
+	}
+	var hostJSON map[string]interface{}
+	if err := json.Unmarshal(hostData, &hostJSON); err != nil {
+		return hostPath, nil, nil
+	}
+
+	spriteData, readErr := spriteExecOutput(spriteName, nil, "sh", "-lc", spriteReadCmd)
+	if readErr != nil || strings.TrimSpace(spriteData) == "" {
+		return hostPath, nil, nil
+	}
+
+	var spriteJSON map[string]interface{}
+	if err := json.Unmarshal([]byte(spriteData), &spriteJSON); err != nil {
+		return hostPath, nil, nil
+	}
+
+	merged := deepMergeJSON(spriteJSON, hostJSON)
+
+	data, err := json.MarshalIndent(merged, "", "  ")
+	if err != nil {
+		return hostPath, nil, nil
+	}
+
+	tmpFile, err := os.CreateTemp("", "seven-merged-*.json")
+	if err != nil {
+		return hostPath, nil, nil
+	}
+	if _, writeErr := tmpFile.Write(data); writeErr != nil {
+		tmpFile.Close()
+		os.Remove(tmpFile.Name())
+		return hostPath, nil, nil
+	}
+	tmpFile.Close()
+
+	return tmpFile.Name(), func() { os.Remove(tmpFile.Name()) }, nil
+}
+
 func ensureClaudeConfigInSprite(spriteName, hostConfigPath string, opts upOptions) error {
 	if hostConfigPath == "" {
 		return nil
@@ -1405,7 +1549,16 @@ func ensureClaudeConfigInSprite(spriteName, hostConfigPath string, opts upOption
 	}
 
 	opts.Logger("[seven init] syncing claude config into sprite")
-	copySpec := hostConfigPath + ":/tmp/host-claude-settings.json"
+
+	srcPath, cleanup, err := mergedJSONForSprite(spriteName, hostConfigPath, `cat "$HOME/.claude/settings.json" 2>/dev/null`)
+	if err != nil {
+		return err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	copySpec := srcPath + ":/tmp/host-claude-settings.json"
 	cmdArgs := []string{
 		"exec",
 		"-s", spriteName,
@@ -1430,13 +1583,75 @@ func ensureClaudeAuthInSprite(spriteName, hostAuthPath string, opts upOptions) e
 	}
 
 	opts.Logger("[seven init] syncing claude auth into sprite")
-	copySpec := hostAuthPath + ":/tmp/host-claude-auth.json"
+
+	srcPath, cleanup, err := mergedJSONForSprite(spriteName, hostAuthPath, `cat "$HOME/.claude.json" 2>/dev/null`)
+	if err != nil {
+		return err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	copySpec := srcPath + ":/tmp/host-claude-auth.json"
 	cmdArgs := []string{
 		"exec",
 		"-s", spriteName,
 		"-file", copySpec,
 		"--",
 		"sh", "-lc", "install -m 600 /tmp/host-claude-auth.json \"$HOME/.claude.json\" && rm -f /tmp/host-claude-auth.json",
+	}
+	if opts.QuietExternal {
+		_, err := runCmdOutput(spriteBin(), nil, cmdArgs...)
+		return err
+	}
+	return runCmd(spriteBin(), nil, cmdArgs...)
+}
+
+// ensureClaudeCredentialsInSprite copies the host's Claude Code OAuth credential
+// store into the sprite's ~/.claude/.credentials.json. Unlike the config/auth
+// syncs this overwrites rather than merges: the host token is the freshest copy,
+// and we want it to replace any stale token already in the sprite. The source is
+// either a host file (Linux) or extracted from the macOS Keychain.
+func ensureClaudeCredentialsInSprite(spriteName string, src claudeCredentialsSource, opts upOptions) error {
+	if !src.present() {
+		return nil
+	}
+	if err := spriteExec(spriteName, nil, opts.QuietExternal, "sh", "-lc", "command -v claude >/dev/null 2>&1"); err != nil {
+		opts.Logger("[seven init] claude not found in sprite, skipping claude credentials sync")
+		return nil
+	}
+
+	hostPath := src.FilePath
+	if src.Keychain {
+		data, err := extractClaudeKeychainCredentials()
+		if err != nil {
+			return fmt.Errorf("reading claude credentials from keychain: %w", err)
+		}
+		tmpFile, err := os.CreateTemp("", "seven-claude-credentials-*.json")
+		if err != nil {
+			return err
+		}
+		defer os.Remove(tmpFile.Name())
+		if _, err := tmpFile.WriteString(data); err != nil {
+			tmpFile.Close()
+			return err
+		}
+		if err := tmpFile.Chmod(0o600); err != nil {
+			tmpFile.Close()
+			return err
+		}
+		tmpFile.Close()
+		hostPath = tmpFile.Name()
+	}
+
+	opts.Logger("[seven init] syncing claude credentials into sprite")
+	copySpec := hostPath + ":/tmp/host-claude-credentials.json"
+	cmdArgs := []string{
+		"exec",
+		"-s", spriteName,
+		"-file", copySpec,
+		"--",
+		"sh", "-lc", "install -d -m 700 \"$HOME/.claude\" && install -m 600 /tmp/host-claude-credentials.json \"$HOME/.claude/.credentials.json\" && rm -f /tmp/host-claude-credentials.json",
 	}
 	if opts.QuietExternal {
 		_, err := runCmdOutput(spriteBin(), nil, cmdArgs...)
