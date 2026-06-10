@@ -387,17 +387,13 @@ func cmdList(args []string) {
 		return
 	}
 	for _, name := range members {
-		ordinal, _ := spriteFamilyOrdinal(base, name)
-		number := ordinal
-		if number == 0 {
-			number = 1
-		}
+		number, _ := spriteFamilyOrdinal(base, name)
 		marker := " "
 		if name == selected {
 			marker = "*"
 		}
 		label := name
-		if ordinal == 0 {
+		if name == base {
 			label = name + " (main)"
 		}
 		styled := lipgloss.NewStyle().Foreground(lipgloss.Color(spriteColor(name))).Render(label)
@@ -446,12 +442,11 @@ func runUp(opts upOptions) (upResult, error) {
 		if err := writeSpriteFile(name); err != nil {
 			return upResult{}, err
 		}
-		if err := syncGitIdentity(name, opts); err != nil {
-			return upResult{}, err
-		}
+		// Git identity is configured once at creation; re-syncing on every up is
+		// redundant and has been observed to hang against an existing sprite.
 		assistantState := detectHostAssistantState(opts)
 		assistantState = syncHostAssistantState(name, assistantState, "[seven up]", opts)
-		if err := configureConsoleBootstrapInSprite(name, name, assistantState.PreferredAssistant, opts); err != nil {
+		if err := configureConsoleBootstrapInSprite(name, spriteFamilyBase(name), assistantState.PreferredAssistant, opts); err != nil {
 			opts.Logger(fmt.Sprintf("[seven up] console bootstrap setup failed: %v", err))
 		}
 		if err := maybeInstallGstack(name, assistantState.PreferredAssistant, opts); err != nil {
@@ -512,12 +507,11 @@ func runInit(opts upOptions) (upResult, error) {
 		if err := writeSpriteFile(name); err != nil {
 			return upResult{}, err
 		}
-		if err := syncGitIdentity(name, opts); err != nil {
-			return upResult{}, err
-		}
+		// Git identity is configured once at creation; re-syncing on every up is
+		// redundant and has been observed to hang against an existing sprite.
 		assistantState := detectHostAssistantState(opts)
 		assistantState = syncHostAssistantState(name, assistantState, "[seven init]", opts)
-		if err := configureConsoleBootstrapInSprite(name, name, assistantState.PreferredAssistant, opts); err != nil {
+		if err := configureConsoleBootstrapInSprite(name, spriteFamilyBase(name), assistantState.PreferredAssistant, opts); err != nil {
 			opts.Logger(fmt.Sprintf("[seven init] console bootstrap setup failed: %v", err))
 		}
 		if err := maybeInstallGstack(name, assistantState.PreferredAssistant, opts); err != nil {
@@ -563,26 +557,30 @@ func runInit(opts upOptions) (upResult, error) {
 		return upResult{Name: name, OpenConsole: false, SpriteExists: false}, nil
 	}
 
+	// Clone into a directory named after the repo (the sprite family base), not
+	// the sprite name, so sibling sprites get "soclimmo" rather than "soclimmo-02".
+	repoDir := spriteFamilyBase(name)
+
 	if repoSlug != "" {
 		if ghToken != "" {
 			opts.Logger(fmt.Sprintf("[seven init] cloning via gh repo clone: %s", repoSlug))
-			if err := spriteExec(name, []string{"GH_TOKEN=" + ghToken}, opts.QuietExternal, "gh", "repo", "clone", repoSlug, name); err != nil {
+			if err := spriteExec(name, []string{"GH_TOKEN=" + ghToken}, opts.QuietExternal, "gh", "repo", "clone", repoSlug, repoDir); err != nil {
 				return upResult{}, err
 			}
 		} else {
 			opts.Logger(fmt.Sprintf("[seven init] cloning via gh repo clone (no token): %s", repoSlug))
-			if err := spriteExec(name, nil, opts.QuietExternal, "gh", "repo", "clone", repoSlug, name); err != nil {
+			if err := spriteExec(name, nil, opts.QuietExternal, "gh", "repo", "clone", repoSlug, repoDir); err != nil {
 				return upResult{}, err
 			}
 		}
-		if err := configureConsoleBootstrapInSprite(name, name, assistantState.PreferredAssistant, opts); err != nil {
+		if err := configureConsoleBootstrapInSprite(name, repoDir, assistantState.PreferredAssistant, opts); err != nil {
 			opts.Logger(fmt.Sprintf("[seven init] console bootstrap setup failed: %v", err))
 		}
 		return upResult{Name: name, OpenConsole: false, SpriteExists: false}, nil
 	}
 
 	opts.Logger(fmt.Sprintf("[seven init] cloning via git clone: %s", repoURL))
-	if err := spriteExec(name, nil, opts.QuietExternal, "git", "clone", repoURL, name); err != nil {
+	if err := spriteExec(name, nil, opts.QuietExternal, "git", "clone", repoURL, repoDir); err != nil {
 		return upResult{}, err
 	}
 	if err := configureConsoleBootstrapInSprite(name, name, assistantState.PreferredAssistant, opts); err != nil {
@@ -769,7 +767,9 @@ func spriteFamilyBase(name string) string {
 func nextSiblingSpriteName(base string, listOut string) string {
 	pattern := regexp.MustCompile(`(^|[^[:alnum:]_])(` + regexp.QuoteMeta(base) + `(?:-[0-9]{2})?)([^[:alnum:]_]|$)`)
 	matches := pattern.FindAllStringSubmatch(listOut, -1)
-	maxOrdinal := 0
+	// Start at 1 (the main sprite) so the first sibling is always -02, keeping
+	// `--new` consistent with `seven up N` and `seven list`.
+	maxOrdinal := 1
 	for _, match := range matches {
 		if len(match) < 3 {
 			continue
@@ -782,12 +782,15 @@ func nextSiblingSpriteName(base string, listOut string) string {
 			maxOrdinal = ordinal
 		}
 	}
-	return fmt.Sprintf("%s-%02d", base, maxOrdinal+1)
+	return siblingSpriteNameForOrdinal(base, maxOrdinal+1)
 }
 
+// spriteFamilyOrdinal returns the 1-based family number for name: the main
+// sprite (bare base) is 1, and "<base>-NN" is NN. This matches the numbering
+// shown by `seven list` and accepted by `seven up N`.
 func spriteFamilyOrdinal(base, name string) (int, bool) {
 	if name == base {
-		return 0, true
+		return 1, true
 	}
 	match := spriteSuffixRe.FindStringSubmatch(name)
 	if len(match) != 3 || match[1] != base {
@@ -1034,33 +1037,55 @@ func maybeInstallGstack(spriteName, assistant string, opts upOptions) error {
 		opts.Logger("[seven init] gstack installed but its skills only run inside Claude Code (assistant: " + assistant + ")")
 	}
 
-	// Skip the clone when gstack is already present (e.g. a re-run on an existing sprite).
-	if err := spriteExec(spriteName, nil, true, "sh", "-lc", `test -d "`+gstackSkillDir+`/.git"`); err == nil {
-		opts.Logger("[seven init] gstack already installed, skipping")
-		return nil
-	}
-
 	if err := spriteExec(spriteName, nil, true, "sh", "-lc", "command -v bun >/dev/null 2>&1"); err != nil {
 		opts.Logger("[seven init] installing bun (gstack dependency)")
-		if err := spriteExec(spriteName, nil, opts.QuietExternal, "sh", "-lc", "curl -fsSL https://bun.sh/install | bash"); err != nil {
-			return fmt.Errorf("bun install failed: %w", err)
+		if out, err := spriteExecOutput(spriteName, nil, "sh", "-lc", "curl -fsSL https://bun.sh/install | bash"); err != nil {
+			return fmt.Errorf("bun install failed: %w%s", err, gstackOutputTail(out))
 		}
 	}
 
-	opts.Logger("[seven init] installing gstack into sprite")
+	// Clone if absent, otherwise refresh; either way (re-)run ./setup, which is
+	// idempotent and is also gstack's documented fix for a partial install. This
+	// lets a previously-failed setup (e.g. the browser download) be retried.
+	opts.Logger("[seven init] installing gstack into sprite (includes a browser download; can take a few minutes)")
 	install := `set -e
 export PATH="$HOME/.bun/bin:$PATH"
-git clone --single-branch --depth 1 ` + gstackRepoURL + ` "` + gstackSkillDir + `"
+if [ -d "` + gstackSkillDir + `/.git" ]; then
+  git -C "` + gstackSkillDir + `" pull --ff-only || true
+else
+  git clone --single-branch --depth 1 ` + gstackRepoURL + ` "` + gstackSkillDir + `"
+fi
 cd "` + gstackSkillDir + `"
 ./setup`
-	return spriteExec(spriteName, nil, opts.QuietExternal, "sh", "-lc", install)
+	if out, err := spriteExecOutput(spriteName, nil, "sh", "-lc", install); err != nil {
+		return fmt.Errorf("gstack setup failed: %w%s", err, gstackOutputTail(out))
+	}
+	opts.Logger("[seven init] gstack installed")
+	return nil
+}
+
+// gstackOutputTail formats the last few lines of captured command output for
+// inclusion in an error, so failures (e.g. the gstack browser download) are
+// diagnosable instead of surfacing only "exit status 1".
+func gstackOutputTail(out string) string {
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return ""
+	}
+	lines := strings.Split(out, "\n")
+	if len(lines) > 12 {
+		lines = lines[len(lines)-12:]
+	}
+	return "\n  " + strings.Join(lines, "\n  ")
 }
 
 // configureSpriteIdentity installs a persistent, color-coded shell prompt and a
 // one-line banner inside the sprite so it is obvious which sprite a console
 // belongs to. The color is derived from the sprite name (see spriteColor) and is
-// stable across sessions, so sibling sprites stay visually distinct. Snippets are
-// written for bash, zsh, and fish and sourced from the usual rc files.
+// stable across sessions, so sibling sprites stay visually distinct. It also
+// defines a `cc` alias for `claude --dangerously-skip-permissions` (safe in a
+// disposable sandbox). Snippets are written for bash, zsh, and fish and sourced
+// from the usual rc files.
 func configureSpriteIdentity(spriteName string, opts upOptions) error {
 	if spriteName == "" {
 		return nil
@@ -1074,9 +1099,11 @@ func configureSpriteIdentity(spriteName string, opts upOptions) error {
   printf 'SEVEN_SPRITE_NAME=%s\n' "$SEVEN_SPRITE_NAME"
   printf 'SEVEN_SPRITE_COLOR=%s\n' "$SEVEN_SPRITE_COLOR"
   cat <<'EOF'
-# seven sprite identity: colored prompt + banner
+# seven sprite identity: colored prompt + banner + cc alias
 case "$-" in
   *i*)
+    # Sprites are disposable sandboxes, so run Claude with full permissions.
+    alias cc='claude --dangerously-skip-permissions'
     if [ -z "${SEVEN_SPRITE_PROMPT_SET:-}" ]; then
       SEVEN_SPRITE_PROMPT_SET=1
       __seven_c="${SEVEN_SPRITE_COLOR:-7}"
@@ -1100,6 +1127,8 @@ install -d -m 700 "$HOME/.config/fish/conf.d"
   printf 'set -g __seven_sprite_color %s\n' "$SEVEN_SPRITE_COLOR"
   cat <<'EOF'
 status is-interactive; or exit 0
+# Sprites are disposable sandboxes, so run Claude with full permissions.
+alias cc 'claude --dangerously-skip-permissions'
 if not functions -q __seven_orig_fish_prompt
   if functions -q fish_prompt
     functions -c fish_prompt __seven_orig_fish_prompt

@@ -155,14 +155,16 @@ func TestSevenUpGstackInstallsBunWhenMissing(t *testing.T) {
 	}
 }
 
-func TestSevenUpGstackSkipsWhenAlreadyPresent(t *testing.T) {
+func TestSevenUpGstackReinstallsWhenAlreadyPresent(t *testing.T) {
 	repo := createTempRepo(t)
 	state, logPath, cleanup := createFakeSprite(t)
 	defer cleanup()
 
+	// gstack's ./setup is idempotent and is the documented fix for a partial
+	// install, so we always (re-)run it rather than skipping when present.
 	log := runSevenUpForLog(t, repo, state, logPath, []string{"SPRITE_EXEC_GSTACK_PRESENT=1"}, "--gstack")
-	if strings.Contains(log, "garrytan/gstack") {
-		t.Fatalf("expected gstack clone to be skipped when already installed, got: %s", log)
+	if !strings.Contains(log, "garrytan/gstack") {
+		t.Fatalf("expected gstack setup to run even when already installed, got: %s", log)
 	}
 }
 
@@ -200,17 +202,16 @@ func TestSevenUpSkipsLoginWhenSpriteExists(t *testing.T) {
 	}
 }
 
-func TestSevenUpSyncsGitIdentityWithExecSeparator(t *testing.T) {
-	repo := t.TempDir()
+func TestSevenInitSyncsGitIdentityWithExecSeparator(t *testing.T) {
+	// Git identity is synced when the sprite is first created. Use a fresh
+	// (not-yet-existing) sprite so we hit the creation path.
+	repo := createTempRepo(t)
 	state, logPath, cleanup := createFakeSprite(t)
 	defer cleanup()
 
-	spriteName := "existing-sprite"
+	spriteName := "git-id-sprite"
 	if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte(spriteName+"\n"), 0o644); err != nil {
 		t.Fatalf("failed to write .sprite: %v", err)
-	}
-	if err := os.WriteFile(state, []byte(spriteName+"\n"), 0o644); err != nil {
-		t.Fatalf("failed to write state: %v", err)
 	}
 
 	fakeHome := t.TempDir()
@@ -245,6 +246,116 @@ func TestSevenUpSyncsGitIdentityWithExecSeparator(t *testing.T) {
 	}
 	if !strings.Contains(log, "exec -s "+spriteName+" -- git config --global user.email test@example.com") {
 		t.Fatalf("expected git email sync to use exec separator, got: %s", log)
+	}
+}
+
+func TestSevenUpSkipsGitIdentitySyncWhenSpriteExists(t *testing.T) {
+	// Re-syncing git identity on an existing sprite is redundant and has hung
+	// in the field, so `seven up` must not do it.
+	repo := t.TempDir()
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	spriteName := "existing-sprite"
+	if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte(spriteName+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .sprite: %v", err)
+	}
+	if err := os.WriteFile(state, []byte(spriteName+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write state: %v", err)
+	}
+
+	fakeHome := t.TempDir()
+	configPath := filepath.Join(fakeHome, ".gitconfig")
+	config := "[user]\n\tname = Test User\n\temail = test@example.com\n"
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatalf("failed to write fake gitconfig: %v", err)
+	}
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+fakeHome,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven up failed: %v\n%s", err, output)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	if strings.Contains(string(logData), "git config --global user.name") {
+		t.Fatalf("expected no git identity sync for existing sprite, got: %s", logData)
+	}
+}
+
+func TestSevenInitClonesIntoRepoBaseDirForSibling(t *testing.T) {
+	// A sibling sprite (myproj-02) should clone the repo into the family base
+	// directory (myproj), not into a directory named after the sprite.
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console", "--sprite", "myproj-02")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven up failed: %v\n%s", err, output)
+	}
+
+	logData, _ := os.ReadFile(logPath)
+	log := string(logData)
+	if !strings.Contains(log, "gh repo clone octo/hello myproj") {
+		t.Fatalf("expected clone into repo base dir 'myproj', got: %s", log)
+	}
+	if strings.Contains(log, "clone octo/hello myproj-02") {
+		t.Fatalf("expected clone dir to be the family base, not the sprite name, got: %s", log)
+	}
+	if !strings.Contains(log, "-env SEVEN_REPO_DIR=myproj,") {
+		t.Fatalf("expected console bootstrap to cd into 'myproj', got: %s", log)
+	}
+}
+
+func TestSevenUpConfiguresCcAlias(t *testing.T) {
+	repo := t.TempDir()
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	spriteName := "existing-sprite"
+	if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte(spriteName+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .sprite: %v", err)
+	}
+	if err := os.WriteFile(state, []byte(spriteName+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write state: %v", err)
+	}
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven up failed: %v\n%s", err, output)
+	}
+
+	logData, _ := os.ReadFile(logPath)
+	if !strings.Contains(string(logData), "claude --dangerously-skip-permissions") {
+		t.Fatalf("expected cc alias setup in sprite identity, got: %s", logData)
 	}
 }
 
