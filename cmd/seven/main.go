@@ -32,6 +32,7 @@ type upOptions struct {
 	SpriteName     string
 	NewSprite      bool
 	ResolvedName   string
+	InstallGstack  bool
 }
 
 type spriteNameInfo struct {
@@ -60,6 +61,8 @@ const (
 	sevenConsoleHookPath   = "$HOME/.seven-console-hook.sh"
 	sevenConsoleMarkerPath = "$HOME/.seven-console-once"
 	sevenDefaultAssistant  = "codex"
+	gstackRepoURL          = "https://github.com/garrytan/gstack.git"
+	gstackSkillDir         = "$HOME/.claude/skills/gstack"
 )
 
 var ansiEscapeRe = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
@@ -96,8 +99,8 @@ func usage() {
 	fmt.Printf("version: %s\n", version)
 	fmt.Println()
 	fmt.Println("Usage:")
-	fmt.Println("  seven init [--assume-logged-in] [--new] [--sprite name]")
-	fmt.Println("  seven up [--assume-logged-in] [--new] [--sprite name] [--no-console] [--no-tui]")
+	fmt.Println("  seven init [--assume-logged-in] [--new] [--sprite name] [--gstack]")
+	fmt.Println("  seven up [--assume-logged-in] [--new] [--sprite name] [--no-console] [--no-tui] [--gstack]")
 	fmt.Println("  seven destroy [--sprite name]")
 	fmt.Println("  seven status")
 	fmt.Println()
@@ -122,6 +125,7 @@ func cmdUp(args []string) {
 	noConsole := fs.Bool("no-console", false, "do not open sprite console after up")
 	newSprite := fs.Bool("new", false, "create and select a new sibling sprite")
 	spriteName := fs.String("sprite", "", "use a specific sprite name")
+	gstack := fs.Bool("gstack", false, "install gstack (github.com/garrytan/gstack) into the sprite")
 	_ = fs.Parse(args)
 	if *newSprite && strings.TrimSpace(*spriteName) != "" {
 		fmt.Fprintln(os.Stderr, "seven up failed: --new and --sprite cannot be used together")
@@ -137,6 +141,7 @@ func cmdUp(args []string) {
 		OpenConsole:    !*noConsole,
 		SpriteName:     strings.TrimSpace(*spriteName),
 		NewSprite:      *newSprite,
+		InstallGstack:  *gstack,
 	}
 	if shouldUseTUI {
 		res, err := runUpWithTUI(opts)
@@ -171,6 +176,7 @@ func cmdInit(args []string) {
 	assumeLoggedIn := fs.Bool("assume-logged-in", false, "skip sprite login")
 	newSprite := fs.Bool("new", false, "create and select a new sibling sprite")
 	spriteName := fs.String("sprite", "", "use a specific sprite name")
+	gstack := fs.Bool("gstack", false, "install gstack (github.com/garrytan/gstack) into the sprite")
 	_ = fs.Parse(args)
 	if *newSprite && strings.TrimSpace(*spriteName) != "" {
 		fmt.Fprintln(os.Stderr, "seven init failed: --new and --sprite cannot be used together")
@@ -184,6 +190,7 @@ func cmdInit(args []string) {
 		OpenConsole:    false,
 		SpriteName:     strings.TrimSpace(*spriteName),
 		NewSprite:      *newSprite,
+		InstallGstack:  *gstack,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "seven init failed: %v\n", err)
@@ -344,6 +351,9 @@ func runUp(opts upOptions) (upResult, error) {
 		if err := configureConsoleBootstrapInSprite(name, name, assistantState.PreferredAssistant, opts); err != nil {
 			opts.Logger(fmt.Sprintf("[seven up] console bootstrap setup failed: %v", err))
 		}
+		if err := maybeInstallGstack(name, assistantState.PreferredAssistant, opts); err != nil {
+			opts.Logger(fmt.Sprintf("[seven up] gstack install failed: %v", err))
+		}
 		return upResult{Name: name, OpenConsole: opts.OpenConsole, SpriteExists: true}, nil
 	}
 
@@ -407,6 +417,9 @@ func runInit(opts upOptions) (upResult, error) {
 		if err := configureConsoleBootstrapInSprite(name, name, assistantState.PreferredAssistant, opts); err != nil {
 			opts.Logger(fmt.Sprintf("[seven init] console bootstrap setup failed: %v", err))
 		}
+		if err := maybeInstallGstack(name, assistantState.PreferredAssistant, opts); err != nil {
+			opts.Logger(fmt.Sprintf("[seven init] gstack install failed: %v", err))
+		}
 		return upResult{Name: name, OpenConsole: false, SpriteExists: true}, nil
 	}
 
@@ -437,6 +450,10 @@ func runInit(opts upOptions) (upResult, error) {
 		opts.Logger(fmt.Sprintf("[seven init] gh auth setup failed: %v", err))
 	}
 	assistantState = syncHostAssistantState(name, assistantState, "[seven init]", opts)
+
+	if err := maybeInstallGstack(name, assistantState.PreferredAssistant, opts); err != nil {
+		opts.Logger(fmt.Sprintf("[seven init] gstack install failed: %v", err))
+	}
 
 	if repoURL == "" {
 		opts.Logger("[seven init] no repo url found, skipping clone")
@@ -841,6 +858,41 @@ printf '%s\n%s\n' "$HOME/$SEVEN_REPO_DIR" "$SEVEN_ASSISTANT" > "` + sevenConsole
 chmod 600 "` + sevenConsoleMarkerPath + `"
 `
 	return spriteExec(spriteName, env, opts.QuietExternal, "sh", "-lc", cmd)
+}
+
+// maybeInstallGstack installs gstack (a Claude Code skill toolkit) inside the
+// sprite when requested via --gstack. It ensures Bun is available, then runs the
+// documented clone + setup. gstack's slash-commands only run inside Claude Code,
+// so it warns when Claude is not the resolved assistant, but still installs.
+func maybeInstallGstack(spriteName, assistant string, opts upOptions) error {
+	if !opts.InstallGstack {
+		return nil
+	}
+
+	if assistant != "claude" {
+		opts.Logger("[seven init] gstack installed but its skills only run inside Claude Code (assistant: " + assistant + ")")
+	}
+
+	// Skip the clone when gstack is already present (e.g. a re-run on an existing sprite).
+	if err := spriteExec(spriteName, nil, true, "sh", "-lc", `test -d "`+gstackSkillDir+`/.git"`); err == nil {
+		opts.Logger("[seven init] gstack already installed, skipping")
+		return nil
+	}
+
+	if err := spriteExec(spriteName, nil, true, "sh", "-lc", "command -v bun >/dev/null 2>&1"); err != nil {
+		opts.Logger("[seven init] installing bun (gstack dependency)")
+		if err := spriteExec(spriteName, nil, opts.QuietExternal, "sh", "-lc", "curl -fsSL https://bun.sh/install | bash"); err != nil {
+			return fmt.Errorf("bun install failed: %w", err)
+		}
+	}
+
+	opts.Logger("[seven init] installing gstack into sprite")
+	install := `set -e
+export PATH="$HOME/.bun/bin:$PATH"
+git clone --single-branch --depth 1 ` + gstackRepoURL + ` "` + gstackSkillDir + `"
+cd "` + gstackSkillDir + `"
+./setup`
+	return spriteExec(spriteName, nil, opts.QuietExternal, "sh", "-lc", install)
 }
 
 func spriteList() (string, error) {
