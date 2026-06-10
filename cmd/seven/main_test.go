@@ -998,45 +998,50 @@ func TestSevenUpConfiguresSpriteIdentity(t *testing.T) {
 	}
 }
 
-func TestSevenLsListsFamily(t *testing.T) {
-	repo := t.TempDir()
-	state, logPath, cleanup := createFakeSprite(t)
-	defer cleanup()
+func TestSevenListListsFamily(t *testing.T) {
+	// "list" is the primary command; "ls" is an accepted alias.
+	for _, sub := range []string{"list", "ls"} {
+		t.Run(sub, func(t *testing.T) {
+			repo := t.TempDir()
+			state, logPath, cleanup := createFakeSprite(t)
+			defer cleanup()
 
-	if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte("seven\n"), 0o644); err != nil {
-		t.Fatalf("failed to write .sprite: %v", err)
-	}
-	if err := os.WriteFile(state, []byte("seven\nseven-02\nother-app\n"), 0o644); err != nil {
-		t.Fatalf("failed to write state: %v", err)
-	}
+			if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte("seven\n"), 0o644); err != nil {
+				t.Fatalf("failed to write .sprite: %v", err)
+			}
+			if err := os.WriteFile(state, []byte("seven\nseven-02\nother-app\n"), 0o644); err != nil {
+				t.Fatalf("failed to write state: %v", err)
+			}
 
-	cmd := exec.Command(testSevenBin, "ls")
-	cmd.Dir = repo
-	cmd.Env = append(os.Environ(),
-		"NO_COLOR=1",
-		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"SPRITE_STATE="+state,
-		"SPRITE_LOG="+logPath,
-	)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("seven ls failed: %v\n%s", err, output)
-	}
-	out := string(output)
-	if !strings.Contains(out, "sprite family for seven") {
-		t.Fatalf("expected family header, got: %s", out)
-	}
-	if !strings.Contains(out, "seven (main)") {
-		t.Fatalf("expected main sprite labeled, got: %s", out)
-	}
-	if !strings.Contains(out, "seven-02") {
-		t.Fatalf("expected sibling listed, got: %s", out)
-	}
-	if strings.Contains(out, "other-app") {
-		t.Fatalf("ls should not list unrelated sprites, got: %s", out)
-	}
-	if !strings.Contains(out, "*") {
-		t.Fatalf("expected selected marker, got: %s", out)
+			cmd := exec.Command(testSevenBin, sub)
+			cmd.Dir = repo
+			cmd.Env = append(os.Environ(),
+				"NO_COLOR=1",
+				"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"SPRITE_STATE="+state,
+				"SPRITE_LOG="+logPath,
+			)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("seven %s failed: %v\n%s", sub, err, output)
+			}
+			out := string(output)
+			if !strings.Contains(out, "sprite family for seven") {
+				t.Fatalf("expected family header, got: %s", out)
+			}
+			if !strings.Contains(out, "seven (main)") {
+				t.Fatalf("expected main sprite labeled, got: %s", out)
+			}
+			if !strings.Contains(out, "seven-02") {
+				t.Fatalf("expected sibling listed, got: %s", out)
+			}
+			if strings.Contains(out, "other-app") {
+				t.Fatalf("list should not show unrelated sprites, got: %s", out)
+			}
+			if !strings.Contains(out, "*") {
+				t.Fatalf("expected selected marker, got: %s", out)
+			}
+		})
 	}
 }
 

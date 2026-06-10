@@ -91,7 +91,7 @@ func main() {
 		cmdDestroy(os.Args[2:])
 	case "status":
 		cmdStatus(os.Args[2:])
-	case "ls", "list":
+	case "list", "ls":
 		cmdList(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
@@ -111,7 +111,7 @@ func usage() {
 	fmt.Println("  seven up [N] [--assume-logged-in] [--new] [--sprite name] [--no-console] [--no-tui]")
 	fmt.Println("  seven destroy [--sprite name]")
 	fmt.Println("  seven status")
-	fmt.Println("  seven ls")
+	fmt.Println("  seven list")
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  version  Show version")
@@ -119,7 +119,7 @@ func usage() {
 	fmt.Println("  up       Create or reuse a sprite. Pass N to open sibling #N (1 = main), or --new for the next one")
 	fmt.Println("  destroy  Destroy the selected sprite, or a specific sprite via --sprite")
 	fmt.Println("  status   Show sprite status for this repo")
-	fmt.Println("  ls       List this repo's sprite family and which one is selected")
+	fmt.Println("  list     List this repo's sprite family and which one is selected (alias: ls)")
 }
 
 var version = "dev"

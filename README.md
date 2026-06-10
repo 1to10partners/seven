@@ -55,7 +55,7 @@ Each sprite is a fully isolated microVM, so running one assistant session per sp
 seven up          # main sprite (#1)
 seven up --new    # create the next sibling (#2, #3, …) and select it
 seven up 2        # reopen sibling #2
-seven ls          # list this repo's sprite family and which one is selected
+seven list        # list this repo's sprite family and which one is selected (alias: ls)
 ```
 
 To avoid confusion when switching between consoles, each sprite gets a **color-coded shell prompt** (bash, zsh, and fish) plus a one-line banner naming it on entry. The color is derived from the sprite name, so a given sprite always shows the same color and siblings stay visually distinct.
@@ -101,7 +101,7 @@ goreleaser release --snapshot --clean
 ```
 
 ## Features
-- **Core CLI:** `seven init`, `seven up`, `seven destroy`, `seven status`, `seven ls`.
+- **Core CLI:** `seven init`, `seven up`, `seven destroy`, `seven status`, `seven list`.
 - **Multiple sprites:** `seven up --new` / `seven up N` to run one assistant session per isolated sprite, with a color-coded prompt per sprite.
 - **Bootstrap:** resolve sprite name, create/reuse sprite, clone repo when possible, setup git.
 - **TUI:** minimal Bubbletea UX.
