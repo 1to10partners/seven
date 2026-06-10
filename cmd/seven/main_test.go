@@ -327,7 +327,7 @@ func TestSevenInitClonesIntoRepoBaseDirForSibling(t *testing.T) {
 	}
 }
 
-func TestSevenUpConfiguresCcAlias(t *testing.T) {
+func TestSevenUpConfiguresCAlias(t *testing.T) {
 	repo := t.TempDir()
 	state, logPath, cleanup := createFakeSprite(t)
 	defer cleanup()
@@ -355,7 +355,7 @@ func TestSevenUpConfiguresCcAlias(t *testing.T) {
 
 	logData, _ := os.ReadFile(logPath)
 	if !strings.Contains(string(logData), "claude --dangerously-skip-permissions") {
-		t.Fatalf("expected cc alias setup in sprite identity, got: %s", logData)
+		t.Fatalf("expected c alias setup in sprite identity, got: %s", logData)
 	}
 }
 
