@@ -85,6 +85,21 @@ const (
 	sevenDefaultAssistant   = "codex"
 	gstackRepoURL           = "https://github.com/garrytan/gstack.git"
 	gstackSkillDir          = "$HOME/.claude/skills/gstack"
+	// gstackChromiumDepsCmd installs the OS shared libraries Chromium links
+	// against (libglib-2.0, libnss3, libgbm, …). gstack's ./setup downloads the
+	// browser *binary* but not these system libs, so on a minimal sprite image
+	// Chromium exits 127 ("error while loading shared libraries: libglib-2.0.so.0")
+	// at launch and every browse command fails. We run this before ./setup so its
+	// own launch self-check passes. Linux + sudo gated; best-effort so non-Debian
+	// hosts (where playwright install-deps is unsupported) still proceed to setup.
+	// `bun x` runs the playwright CLI under bun, sidestepping the `#!/usr/bin/env
+	// node` shebang failing when node is absent from root's PATH under sudo; the
+	// preserved PATH lets sudo find bun itself.
+	gstackChromiumDepsCmd = `if [ "$(uname -s)" = "Linux" ] && command -v sudo >/dev/null 2>&1; then
+  echo "[seven] installing Chromium system dependencies (libglib-2.0, libnss3, …)"
+  sudo env "PATH=$PATH" bun x playwright install-deps chromium ||
+    echo "[seven] warning: could not install Chromium system deps; browse may fail to launch"
+fi`
 )
 
 // spriteIdentityPalette holds distinct 256-color codes used to tint each
@@ -1064,6 +1079,7 @@ else
   git clone --single-branch --depth 1 ` + gstackRepoURL + ` "` + gstackSkillDir + `"
 fi
 cd "` + gstackSkillDir + `"
+` + gstackChromiumDepsCmd + `
 ./setup`
 	if out, err := spriteExecOutput(spriteName, nil, "sh", "-lc", install); err != nil {
 		return fmt.Errorf("gstack setup failed: %w%s", err, gstackOutputTail(out))
