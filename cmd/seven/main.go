@@ -599,6 +599,9 @@ func runInit(opts upOptions) (upResult, error) {
 		if err := configureConsoleBootstrapInSprite(name, repoDir, assistantState.PreferredAssistant, opts); err != nil {
 			opts.Logger(fmt.Sprintf("[seven init] console bootstrap setup failed: %v", err))
 		}
+		if err := maybeInstallProjectTooling(name, repoDir, opts); err != nil {
+			opts.Logger(fmt.Sprintf("[seven init] project tooling install failed: %v", err))
+		}
 		return upResult{Name: name, OpenConsole: false, SpriteExists: false}, nil
 	}
 
@@ -608,6 +611,9 @@ func runInit(opts upOptions) (upResult, error) {
 	}
 	if err := configureConsoleBootstrapInSprite(name, name, assistantState.PreferredAssistant, opts); err != nil {
 		opts.Logger(fmt.Sprintf("[seven init] console bootstrap setup failed: %v", err))
+	}
+	if err := maybeInstallProjectTooling(name, repoDir, opts); err != nil {
+		opts.Logger(fmt.Sprintf("[seven init] project tooling install failed: %v", err))
 	}
 
 	return upResult{Name: name, OpenConsole: false, SpriteExists: false}, nil
@@ -1098,6 +1104,55 @@ func gstackOutputTail(out string) string {
 		lines = lines[len(lines)-12:]
 	}
 	return "\n  " + strings.Join(lines, "\n  ")
+}
+
+// projectToolingManifestRelPath is the conventional path, within a cloned repo, of a project's
+// declarative tooling manifest. A project opts into auto-install simply by shipping this file —
+// one tool per line: "kind name npm-spec(pinned) verify-command". This keeps seven entirely
+// project-agnostic: it hardcodes no project's dependencies, it just honors whatever the pulled
+// repo declares.
+const projectToolingManifestRelPath = "scripts/sprite-tooling.manifest"
+
+// projectToolingInstallScript builds the shell that installs a project's declared tooling from
+// its manifest: idempotent verify-then-install of pinned npm globals (skip if `verify` already
+// passes). Pure (no I/O) so it is unit-testable.
+func projectToolingInstallScript(manifestPath string) string {
+	return `set -u
+MANIFEST="` + manifestPath + `"
+command -v npm >/dev/null 2>&1 || { echo "[project-tooling] npm not on PATH; skipping"; exit 0; }
+present="" installed="" failed=""
+while read -r kind name spec verify; do
+  case "$kind" in ''|\#*) continue ;; esac
+  [ "$kind" = npm ] || continue
+  if eval "$verify" >/dev/null 2>&1; then present="$present $name"
+  elif npm i -g "$spec" >/dev/null 2>&1; then installed="$installed $name"
+  else failed="$failed $name"; fi
+done < "$MANIFEST"
+echo "[project-tooling] present:${present:- none} | installed:${installed:- none} | failed:${failed:- none}"`
+}
+
+// maybeInstallProjectTooling installs a freshly-cloned repo's declared CLI/MCP tooling into the
+// sprite, if the repo ships scripts/sprite-tooling.manifest. It mirrors a project's own
+// idempotent installer (pinned npm globals) so a fresh sprite is "born" with the project's tools
+// — without seven hardcoding any project's dependencies.
+//
+// Best-effort: a missing manifest is the common case (returns nil silently); a failing install is
+// logged by the caller and never blocks `seven up`.
+func maybeInstallProjectTooling(spriteName, repoDir string, opts upOptions) error {
+	manifest := "$HOME/" + repoDir + "/" + projectToolingManifestRelPath
+	// Most repos ship no manifest — a quick existence check, then quietly do nothing.
+	if err := spriteExec(spriteName, nil, true, "sh", "-lc", `test -f "`+manifest+`"`); err != nil {
+		return nil
+	}
+	opts.Logger("[seven init] project tooling manifest found — installing its pinned tools")
+	out, err := spriteExecOutput(spriteName, nil, "sh", "-lc", projectToolingInstallScript(manifest))
+	if err != nil {
+		return fmt.Errorf("project tooling install failed: %w%s", err, gstackOutputTail(out))
+	}
+	if s := strings.TrimSpace(out); s != "" {
+		opts.Logger("[seven init] " + s)
+	}
+	return nil
 }
 
 // configureSpriteIdentity installs a persistent, color-coded shell prompt and a
