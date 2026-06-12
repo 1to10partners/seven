@@ -145,7 +145,7 @@ func usage() {
 	fmt.Println("Usage:")
 	fmt.Println("  seven init [--assume-logged-in] [--new] [--sprite name] [--gstack]")
 	fmt.Println("  seven up [N] [--assume-logged-in] [--new] [--sprite name] [--no-console] [--no-tui] [--gstack]")
-	fmt.Println("  seven destroy [--sprite name]")
+	fmt.Println("  seven destroy [name] [--sprite name]")
 	fmt.Println("  seven status")
 	fmt.Println("  seven list")
 	fmt.Println()
@@ -153,7 +153,7 @@ func usage() {
 	fmt.Println("  version  Show version")
 	fmt.Println("  init     One-time setup (login, create sprite, clone repo)")
 	fmt.Println("  up       Create or reuse a sprite. Pass N to open sibling #N (1 = main), or --new for the next one")
-	fmt.Println("  destroy  Destroy the selected sprite, or a specific sprite via --sprite")
+	fmt.Println("  destroy  Destroy the selected sprite, or a specific sprite by name (positional or --sprite)")
 	fmt.Println("  status   Show sprite status for this repo")
 	fmt.Println("  list     List this repo's sprite family and which one is selected (alias: ls)")
 }
@@ -269,12 +269,30 @@ func cmdDestroy(args []string) {
 	spriteName := fs.String("sprite", "", "destroy a specific sprite name")
 	_ = fs.Parse(args)
 
+	name := strings.TrimSpace(*spriteName)
+
+	// Accept the sprite name as a positional argument too (e.g.
+	// "seven destroy soclimmo-03"), and refuse to run when extra arguments
+	// are present. Previously a positional name was silently ignored and
+	// destroy fell back to the selected sprite — destroying the wrong one.
+	if rest := fs.Args(); len(rest) > 0 {
+		if len(rest) > 1 {
+			fmt.Fprintf(os.Stderr, "seven destroy failed: too many arguments: %s\n", strings.Join(rest, " "))
+			os.Exit(1)
+		}
+		positional := strings.TrimSpace(rest[0])
+		if name != "" && name != positional {
+			fmt.Fprintf(os.Stderr, "seven destroy failed: conflicting sprite names %q (--sprite) and %q\n", name, positional)
+			os.Exit(1)
+		}
+		name = positional
+	}
+
 	info, err := resolveSpriteName()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to resolve sprite name: %v\n", err)
 		os.Exit(1)
 	}
-	name := strings.TrimSpace(*spriteName)
 	clearSelection := false
 	if name == "" {
 		if !info.FromFile {
