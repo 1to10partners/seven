@@ -244,6 +244,122 @@ func TestSevenUpSkipsProjectToolingWithoutManifest(t *testing.T) {
 	}
 }
 
+// TestProjectToolingInstallScriptBehavior actually *runs* the production install script (the same
+// string returned by projectToolingInstallScript) against a real /bin/sh, with fake npm + verify
+// binaries on PATH. Unlike the fake-sprite tests above — which only prove seven dispatches the
+// command — this exercises the script's real logic: idempotent skip, install-when-missing, failure
+// recording, non-npm-kind and comment skipping, and the npm-absent no-op.
+func TestProjectToolingInstallScriptBehavior(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	t.Run("installs missing, skips present, records failures, ignores non-npm", func(t *testing.T) {
+		dir := t.TempDir()
+		binDir := filepath.Join(dir, "bin")
+		if err := os.MkdirAll(binDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		npmLog := filepath.Join(dir, "npm.log")
+
+		// Fake npm: record every "i -g <spec>" call so we can assert exactly which pinned specs
+		// were installed; fail only for the fail-tool spec to exercise the failed branch.
+		writeExecutable(t, filepath.Join(binDir, "npm"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+npmLog+`"
+case "$3" in
+  fail-tool@*) exit 1 ;;
+esac
+exit 0
+`)
+		// present-tool's verify command succeeds → it must be skipped (idempotent). missing-tool
+		// and fail-tool have no verify binary, so their verify fails and install is attempted.
+		writeExecutable(t, filepath.Join(binDir, "present-tool"), "#!/bin/sh\nexit 0\n")
+
+		manifest := filepath.Join(dir, "sprite-tooling.manifest")
+		if err := os.WriteFile(manifest, []byte(`# a comment line is skipped
+
+npm     present-tool  present-tool@1.0.0  present-tool --version
+npm     missing-tool  missing-tool@2.0.0  missing-tool --version
+npm     fail-tool     fail-tool@3.0.0     fail-tool --version
+pip     ignored       ignored==4.0.0      ignored --version
+`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		out := runInstallScript(t, projectToolingInstallScript(manifest), binDir)
+
+		if !strings.Contains(out, "present: present-tool") {
+			t.Errorf("expected present-tool reported present (verify passed), got: %s", out)
+		}
+		if !strings.Contains(out, "installed: missing-tool") {
+			t.Errorf("expected missing-tool reported installed, got: %s", out)
+		}
+		if !strings.Contains(out, "failed: fail-tool") {
+			t.Errorf("expected fail-tool reported failed, got: %s", out)
+		}
+
+		data, err := os.ReadFile(npmLog)
+		if err != nil {
+			t.Fatalf("reading npm log: %v", err)
+		}
+		log := string(data)
+		if !strings.Contains(log, "i -g missing-tool@2.0.0") {
+			t.Errorf("expected npm install of pinned missing-tool spec, got npm log: %q", log)
+		}
+		if !strings.Contains(log, "i -g fail-tool@3.0.0") {
+			t.Errorf("expected npm install attempt of fail-tool, got npm log: %q", log)
+		}
+		if strings.Contains(log, "present-tool") {
+			t.Errorf("present-tool verify passed; its npm install must be skipped, got npm log: %q", log)
+		}
+		if strings.Contains(log, "ignored") {
+			t.Errorf("non-npm kind must be ignored, got npm log: %q", log)
+		}
+	})
+
+	t.Run("no-op when npm is absent", func(t *testing.T) {
+		dir := t.TempDir()
+		binDir := filepath.Join(dir, "bin") // intentionally empty: no npm on PATH
+		if err := os.MkdirAll(binDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		manifest := filepath.Join(dir, "sprite-tooling.manifest")
+		if err := os.WriteFile(manifest, []byte("npm tool tool@1.0.0 tool --version\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		out := runInstallScript(t, projectToolingInstallScript(manifest), binDir)
+		if !strings.Contains(out, "npm not on PATH") {
+			t.Errorf("expected the npm-absent skip message, got: %s", out)
+		}
+	})
+}
+
+// writeExecutable writes an executable script to path (0o755) for use as a fake binary on PATH.
+func writeExecutable(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("writing fake executable %s: %v", path, err)
+	}
+}
+
+// runInstallScript runs an install script under /bin/sh with an isolated PATH (binDir only), so the
+// only external commands it can reach are the fakes placed in binDir. Returns combined output.
+func runInstallScript(t *testing.T, script, binDir string) string {
+	t.Helper()
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not available")
+	}
+	cmd := exec.Command(sh, "-c", script)
+	cmd.Env = []string{"PATH=" + binDir, "HOME=" + t.TempDir()}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("install script returned error: %v\n%s", err, out)
+	}
+	return string(out)
+}
+
 func TestSevenUpGstackReinstallsWhenAlreadyPresent(t *testing.T) {
 	repo := createTempRepo(t)
 	state, logPath, cleanup := createFakeSprite(t)
