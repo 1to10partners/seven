@@ -62,6 +62,18 @@ Siblings are numbered consistently: the main sprite is **#1**, and `seven up --n
 
 To avoid confusion when switching between consoles, each sprite gets a **color-coded shell prompt** (bash, zsh, and fish) plus a one-line banner naming it on entry. The color is derived from the sprite name, so a given sprite always shows the same color and siblings stay visually distinct. Each sprite also defines a **`c` alias** for `claude --dangerously-skip-permissions` — sprites are disposable sandboxes, so running Claude with full permissions (no per-tool prompts, no folder-trust dialog) is the convenient default.
 
+### Project tooling (per-repo, no hardcoded deps)
+A repo can declare the CLIs/MCP servers its agent needs, and `seven` installs them into the sprite right after cloning — so a fresh sprite is "born" with the project's tools, with **no project-specific dependencies hardcoded in `seven`**. Opt in by committing a manifest at `scripts/sprite-tooling.manifest`, one tool per line:
+
+```
+# kind  name          npm-spec (pinned)     verify-command
+npm     vercel        vercel@54.12.2        vercel --version
+npm     neonctl       neonctl@2.25.1        neonctl --version
+npm     langfuse-mcp  langfuse-mcp@1.2.0    langfuse-mcp --version
+```
+
+Install is **idempotent** (each row is skipped when its `verify-command` already passes), pinned (supply-chain hygiene), and **best-effort** — a missing manifest is the common case and a failed install never blocks `seven up`. Repos without the manifest are unaffected. (Secrets are *not* handled here — tooling install only; credentials are a separate, project-owned concern.)
+
 ### Assistant authentication
 Host assistant credentials are copied into the sprite **once, at creation**, mirroring how `gh` auth is bootstrapped. Subsequent `seven up`s do not re-sync — re-running config + auth uploads for both assistants on every reconnect added noticeable latency without changing the result for a working sprite.
 

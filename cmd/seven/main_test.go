@@ -178,6 +178,72 @@ func TestSevenUpGstackInstallsBunWhenMissing(t *testing.T) {
 	}
 }
 
+func TestProjectToolingInstallScript(t *testing.T) {
+	s := projectToolingInstallScript("$HOME/myrepo/scripts/sprite-tooling.manifest")
+	for _, want := range []string{
+		`MANIFEST="$HOME/myrepo/scripts/sprite-tooling.manifest"`,
+		"command -v npm",
+		"npm i -g",
+		"[project-tooling]",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("install script missing %q; got:\n%s", want, s)
+		}
+	}
+}
+
+func TestSevenUpInstallsProjectToolingWhenManifestPresent(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	// SPRITE_EXEC_PROJECT_MANIFEST=1 makes the fake sprite report the manifest present, so
+	// seven runs the install (verify-then-`npm i -g` from the manifest).
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		"SPRITE_EXEC_PROJECT_MANIFEST=1",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("seven up failed: %v\n%s", err, out)
+	}
+	data, _ := os.ReadFile(logPath)
+	log := string(data)
+	if !strings.Contains(log, "scripts/sprite-tooling.manifest") {
+		t.Fatalf("expected the project manifest existence check in log, got: %s", log)
+	}
+	if !strings.Contains(log, "npm i -g") {
+		t.Fatalf("expected project tooling install (npm i -g) when manifest present, got: %s", log)
+	}
+}
+
+func TestSevenUpSkipsProjectToolingWithoutManifest(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	// Default fake sprite reports no manifest → seven must not run any install.
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("seven up failed: %v\n%s", err, out)
+	}
+	data, _ := os.ReadFile(logPath)
+	if strings.Contains(string(data), "npm i -g") {
+		t.Fatalf("expected no project tooling install without a manifest, got: %s", string(data))
+	}
+}
+
 func TestSevenUpGstackReinstallsWhenAlreadyPresent(t *testing.T) {
 	repo := createTempRepo(t)
 	state, logPath, cleanup := createFakeSprite(t)
@@ -1886,6 +1952,14 @@ case "$cmd" in
           exit 1
         fi
         exit 0
+        ;;
+      *sprite-tooling.manifest*)
+        # Simulate a project tooling manifest being present/absent in the cloned repo.
+        # Default: absent (exit 1), so most tests don't trigger the install path.
+        if [ "${SPRITE_EXEC_PROJECT_MANIFEST:-}" = "1" ]; then
+          exit 0
+        fi
+        exit 1
         ;;
     esac
     exit 0
