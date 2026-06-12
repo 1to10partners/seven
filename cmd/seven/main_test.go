@@ -256,24 +256,35 @@ func TestProjectToolingInstallScriptBehavior(t *testing.T) {
 
 	t.Run("installs missing, skips present, records failures, ignores non-npm", func(t *testing.T) {
 		dir := t.TempDir()
-		binDir := filepath.Join(dir, "bin")
-		if err := os.MkdirAll(binDir, 0o755); err != nil {
+		// pathDir is the script's entire PATH; gbin is the npm global bin dir, reachable ONLY via
+		// `npm prefix -g` (parent = dir, so dir/bin == gbin). present-tool lives in gbin only, so it
+		// resolves solely because the script puts the global bin dir on PATH — the regression guard.
+		pathDir := filepath.Join(dir, "path")
+		gbin := filepath.Join(dir, "bin")
+		if err := os.MkdirAll(pathDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(gbin, 0o755); err != nil {
 			t.Fatal(err)
 		}
 		npmLog := filepath.Join(dir, "npm.log")
 
-		// Fake npm: record every "i -g <spec>" call so we can assert exactly which pinned specs
-		// were installed; fail only for the fail-tool spec to exercise the failed branch.
-		writeExecutable(t, filepath.Join(binDir, "npm"), `#!/bin/sh
+		// Fake npm: report its global prefix as `dir` (so $prefix/bin == gbin), record every
+		// "i -g <spec>" call so we can assert exactly which pinned specs were installed, and fail
+		// only for the fail-tool spec to exercise the failed branch.
+		writeExecutable(t, filepath.Join(pathDir, "npm"), `#!/bin/sh
+case "$1" in
+  prefix) printf '%s\n' "`+dir+`"; exit 0 ;;
+esac
 printf '%s\n' "$*" >> "`+npmLog+`"
 case "$3" in
   fail-tool@*) exit 1 ;;
 esac
 exit 0
 `)
-		// present-tool's verify command succeeds → it must be skipped (idempotent). missing-tool
-		// and fail-tool have no verify binary, so their verify fails and install is attempted.
-		writeExecutable(t, filepath.Join(binDir, "present-tool"), "#!/bin/sh\nexit 0\n")
+		// present-tool's verify succeeds (its bin is in the global bin dir) → it must be skipped.
+		// missing-tool and fail-tool have no verify binary, so their verify fails → install attempted.
+		writeExecutable(t, filepath.Join(gbin, "present-tool"), "#!/bin/sh\nexit 0\n")
 
 		manifest := filepath.Join(dir, "sprite-tooling.manifest")
 		if err := os.WriteFile(manifest, []byte(`# a comment line is skipped
@@ -286,10 +297,10 @@ pip     ignored       ignored==4.0.0      ignored --version
 			t.Fatal(err)
 		}
 
-		out := runInstallScript(t, projectToolingInstallScript(manifest), binDir)
+		out := runInstallScript(t, projectToolingInstallScript(manifest), pathDir)
 
 		if !strings.Contains(out, "present: present-tool") {
-			t.Errorf("expected present-tool reported present (verify passed), got: %s", out)
+			t.Errorf("expected present-tool reported present (verify resolved via npm global bin), got: %s", out)
 		}
 		if !strings.Contains(out, "installed: missing-tool") {
 			t.Errorf("expected missing-tool reported installed, got: %s", out)

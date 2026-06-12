@@ -481,12 +481,16 @@ func TestIntegrationProjectToolingInstallsFromManifest(t *testing.T) {
 		t.Fatalf("expected semver installed on first run, got: %s", firstOut)
 	}
 
-	// The tool must now actually be present on PATH in the sprite.
-	if err := exec.Command("sprite", "exec", "-s", name, "sh", "-lc", "command -v semver").Run(); err != nil {
-		t.Fatalf("expected semver CLI on PATH in sprite after install: %v", err)
+	// The tool must really be installed — assert its bin exists in npm's global bin dir (npm's own
+	// prefix, independent of interactive-shell PATH), proving install happened and is not just an
+	// `npm i -g` that exited 0.
+	if err := exec.Command("sprite", "exec", "-s", name, "sh", "-lc", `test -f "$(npm prefix -g)/bin/semver"`).Run(); err != nil {
+		t.Fatalf("expected semver bin in npm global bin dir after install: %v", err)
 	}
 
-	// Second run: verify already passes, so the row is skipped — idempotent, no reinstall.
+	// Second run: the script puts npm's global bin on PATH so the verify-command resolves the
+	// just-installed tool and the row is skipped — the idempotent, fast no-op `seven up` promises.
+	// (This is exactly what fails if the install script does not augment PATH before verifying.)
 	secondOut, err := exec.Command("sprite", "exec", "-s", name, "sh", "-lc", script).CombinedOutput()
 	if err != nil {
 		t.Fatalf("second tooling install failed: %v\n%s", err, secondOut)
