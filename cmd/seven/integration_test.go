@@ -421,6 +421,85 @@ func TestIntegrationCodexChatGPTAuthPersistsInSprite(t *testing.T) {
 	}
 }
 
+// TestIntegrationProjectToolingInstallsFromManifest exercises the project-tooling install end to
+// end inside a real sprite against the real npm registry: it runs the exact production install
+// script (projectToolingInstallScript) over a manifest declaring a small pinned npm tool, then
+// asserts the tool is actually installed and on PATH, and that a second run is a no-op (idempotent).
+func TestIntegrationProjectToolingInstallsFromManifest(t *testing.T) {
+	if os.Getenv("SEVEN_INTEGRATION") != "1" {
+		t.Skip("set SEVEN_INTEGRATION=1 to run integration tests")
+	}
+
+	if _, err := exec.LookPath("sprite"); err != nil {
+		t.Skip("sprite CLI not found in PATH")
+	}
+	if err := exec.Command("sprite", "list").Run(); err != nil {
+		t.Skip("sprite list failed; ensure you are logged in")
+	}
+
+	repo := t.TempDir()
+	name := uniqueSpriteName()
+	if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte(name+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .sprite: %v", err)
+	}
+
+	cmdInit := exec.Command(testSevenBin, "init", "--assume-logged-in")
+	cmdInit.Dir = repo
+	cmdInit.Stdout = os.Stdout
+	cmdInit.Stderr = os.Stderr
+	cmdInit.Env = integrationSevenEnv()
+	if err := cmdInit.Run(); err != nil {
+		t.Fatalf("seven init failed: %v", err)
+	}
+	defer destroySprite(t, repo)
+
+	// npm is a prerequisite for the install path; without it the script is a documented no-op.
+	if err := exec.Command("sprite", "exec", "-s", name, "sh", "-lc", "command -v npm").Run(); err != nil {
+		t.Skip("npm not available in sprite")
+	}
+
+	// Ship a manifest in the sprite declaring a small, pinned npm tool. The verify command
+	// `command -v semver` fails before install and passes after — independent of the tool's flags.
+	manifestPath := "$HOME/tooling-it.manifest"
+	manifestBody := "npm semver semver@7.5.4 command -v semver\n"
+	writeManifest := exec.Command("sprite", "exec", "-s", name, "sh", "-lc",
+		"cat > \""+manifestPath+"\" <<'MANIFEST_EOF'\n"+manifestBody+"MANIFEST_EOF")
+	if out, err := writeManifest.CombinedOutput(); err != nil {
+		t.Fatalf("failed to write manifest in sprite: %v\n%s", err, out)
+	}
+
+	// Start from a clean slate so the first run genuinely installs (not "already present").
+	_ = exec.Command("sprite", "exec", "-s", name, "sh", "-lc", "npm rm -g semver >/dev/null 2>&1 || true").Run()
+
+	script := projectToolingInstallScript(manifestPath)
+
+	firstOut, err := exec.Command("sprite", "exec", "-s", name, "sh", "-lc", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("first tooling install failed: %v\n%s", err, firstOut)
+	}
+	if !strings.Contains(string(firstOut), "installed: semver") {
+		t.Fatalf("expected semver installed on first run, got: %s", firstOut)
+	}
+
+	// The tool must really be installed — assert its bin exists in npm's global bin dir (npm's own
+	// prefix, independent of interactive-shell PATH), proving install happened and is not just an
+	// `npm i -g` that exited 0.
+	if err := exec.Command("sprite", "exec", "-s", name, "sh", "-lc", `test -f "$(npm prefix -g)/bin/semver"`).Run(); err != nil {
+		t.Fatalf("expected semver bin in npm global bin dir after install: %v", err)
+	}
+
+	// Second run: the script puts npm's global bin on PATH so the verify-command resolves the
+	// just-installed tool and the row is skipped — the idempotent, fast no-op `seven up` promises.
+	// (This is exactly what fails if the install script does not augment PATH before verifying.)
+	secondOut, err := exec.Command("sprite", "exec", "-s", name, "sh", "-lc", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("second tooling install failed: %v\n%s", err, secondOut)
+	}
+	if !strings.Contains(string(secondOut), "present: semver") {
+		t.Fatalf("expected semver reported present (idempotent) on second run, got: %s", secondOut)
+	}
+}
+
 func spriteListed(name string) bool {
 	out, err := exec.Command("sprite", "list").CombinedOutput()
 	if err != nil {

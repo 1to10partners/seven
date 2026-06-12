@@ -1120,6 +1120,12 @@ func projectToolingInstallScript(manifestPath string) string {
 	return `set -u
 MANIFEST="` + manifestPath + `"
 command -v npm >/dev/null 2>&1 || { echo "[project-tooling] npm not on PATH; skipping"; exit 0; }
+# npm's global bin dir (e.g. nvm's node bin) is only on PATH in an interactive shell; this script
+# runs non-interactively, so a freshly-installed tool's verify-command would not resolve and we'd
+# reinstall it on every run. Put the global bin dir on PATH first so verify-then-install is actually
+# idempotent.
+NPM_BIN="$(npm prefix -g 2>/dev/null)/bin"
+case ":$PATH:" in *":$NPM_BIN:"*) ;; *) PATH="$NPM_BIN:$PATH"; export PATH ;; esac
 present="" installed="" failed=""
 while read -r kind name spec verify; do
   case "$kind" in ''|\#*) continue ;; esac
