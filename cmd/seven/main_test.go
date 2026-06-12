@@ -1808,6 +1808,86 @@ func TestSevenDestroySpriteKeepsDifferentSelection(t *testing.T) {
 	}
 }
 
+func TestSevenDestroyPositionalNameTargetsThatSprite(t *testing.T) {
+	// Regression: "seven destroy other-sprite" (positional name) must destroy
+	// other-sprite, not silently fall back to the selected current-sprite.
+	repo := t.TempDir()
+	state, _, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte("current-sprite\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .sprite: %v", err)
+	}
+	if err := os.WriteFile(state, []byte("current-sprite\nother-sprite\n"), 0o644); err != nil {
+		t.Fatalf("failed to write state: %v", err)
+	}
+
+	cmd := exec.Command(testSevenBin, "destroy", "other-sprite")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven destroy <name> failed: %v\n%s", err, output)
+	}
+
+	data, err := os.ReadFile(filepath.Join(repo, ".sprite"))
+	if err != nil {
+		t.Fatalf("expected .sprite to remain: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "current-sprite" {
+		t.Fatalf("expected .sprite to keep current selection, got %q", got)
+	}
+
+	stateData, err := os.ReadFile(state)
+	if err != nil {
+		t.Fatalf("failed to read state: %v", err)
+	}
+	if strings.Contains(string(stateData), "other-sprite") {
+		t.Fatalf("expected other-sprite to be removed from state")
+	}
+	if !strings.Contains(string(stateData), "current-sprite") {
+		t.Fatalf("expected current-sprite to remain in state")
+	}
+}
+
+func TestSevenDestroyRejectsTooManyArguments(t *testing.T) {
+	repo := t.TempDir()
+	state, _, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	if err := os.WriteFile(filepath.Join(repo, ".sprite"), []byte("current-sprite\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .sprite: %v", err)
+	}
+	if err := os.WriteFile(state, []byte("current-sprite\n"), 0o644); err != nil {
+		t.Fatalf("failed to write state: %v", err)
+	}
+
+	cmd := exec.Command(testSevenBin, "destroy", "one", "two")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected seven destroy to fail with too many arguments\n%s", output)
+	}
+	if !bytes.Contains(output, []byte("too many arguments")) {
+		t.Fatalf("expected too-many-arguments error, got: %s", output)
+	}
+	// The selected sprite must be left untouched.
+	stateData, err := os.ReadFile(state)
+	if err != nil {
+		t.Fatalf("failed to read state: %v", err)
+	}
+	if !strings.Contains(string(stateData), "current-sprite") {
+		t.Fatalf("expected current-sprite to remain in state")
+	}
+}
+
 func TestSevenDestroyRequiresSelectedSpriteWithoutFlag(t *testing.T) {
 	repo := t.TempDir()
 	state, _, cleanup := createFakeSprite(t)
