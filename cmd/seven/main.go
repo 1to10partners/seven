@@ -584,7 +584,6 @@ func runInit(opts upOptions) (upResult, error) {
 	if err != nil {
 		return upResult{}, err
 	}
-	repoBranch := detectRepoBranch(opts)
 	assistantState := detectHostAssistantState(opts)
 	if err := ensureGhAuthInSprite(name, ghToken, opts); err != nil {
 		opts.Logger(fmt.Sprintf("[seven init] gh auth setup failed: %v", err))
@@ -597,6 +596,10 @@ func runInit(opts upOptions) (upResult, error) {
 		}
 		opts.Logger("[seven init] no repo url found, skipping clone")
 		return upResult{Name: name, OpenConsole: false, SpriteExists: false}, nil
+	}
+	repoBranch, repoHead, err := detectRepoCheckout(opts)
+	if err != nil {
+		return upResult{}, err
 	}
 
 	// Clone into a directory named after the repo (the sprite family base), not
@@ -622,6 +625,9 @@ func runInit(opts upOptions) (upResult, error) {
 				return upResult{}, err
 			}
 		}
+		if err := verifyClonedRepoHead(name, repoDir, repoHead); err != nil {
+			return upResult{}, err
+		}
 		if err := configureConsoleBootstrapInSprite(name, repoDir, assistantState.PreferredAssistant, opts); err != nil {
 			opts.Logger(fmt.Sprintf("[seven init] console bootstrap setup failed: %v", err))
 		}
@@ -640,6 +646,9 @@ func runInit(opts upOptions) (upResult, error) {
 	cloneArgs = append(cloneArgs, repoURL, repoDir)
 	commandArgs := append([]string{"git"}, cloneArgs...)
 	if err := spriteExec(name, nil, opts.QuietExternal, commandArgs...); err != nil {
+		return upResult{}, err
+	}
+	if err := verifyClonedRepoHead(name, repoDir, repoHead); err != nil {
 		return upResult{}, err
 	}
 	if err := configureConsoleBootstrapInSprite(name, name, assistantState.PreferredAssistant, opts); err != nil {
@@ -1579,27 +1588,53 @@ func spriteListedInOutput(out, name string) bool {
 	return false
 }
 
-// detectRepoBranch returns the current host branch so a newly-created Sprite
-// starts on the same pushed feature branch. This is essential for testing
-// cross-repository provisioning changes before they merge to the default branch.
-func detectRepoBranch(opts upOptions) string {
+// detectRepoCheckout returns a clean branch + commit identity. A dirty or
+// detached checkout cannot be reproduced by cloning and therefore must never
+// be used as evidence from a supposedly clean Sprite.
+func detectRepoCheckout(opts upOptions) (string, string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return ""
+		return "", "", err
+	}
+	dirty, err := runCmdOutput("git", nil, "-C", cwd, "status", "--porcelain", "--untracked-files=normal", "--", ".", ":(exclude).sprite")
+	if err != nil {
+		return "", "", fmt.Errorf("inspect host checkout: %w", err)
+	}
+	if strings.TrimSpace(dirty) != "" {
+		return "", "", fmt.Errorf("host checkout is dirty; commit and push it before creating a reproducible Sprite")
 	}
 	branch, err := runCmdOutput("git", nil, "-C", cwd, "symbolic-ref", "--quiet", "--short", "HEAD")
 	if err != nil {
-		return ""
+		return "", "", fmt.Errorf("host checkout is detached; use a pushed branch before creating a reproducible Sprite")
 	}
 	branch = strings.TrimSpace(branch)
 	if branch == "" {
-		return ""
+		return "", "", fmt.Errorf("host checkout has no branch")
 	}
 	if _, err := runCmdOutput("git", nil, "check-ref-format", "--branch", branch); err != nil {
 		opts.Logger(fmt.Sprintf("[seven init] ignoring invalid host branch %q", branch))
-		return ""
+		return "", "", fmt.Errorf("invalid host branch %q", branch)
 	}
-	return branch
+	head, err := runCmdOutput("git", nil, "-C", cwd, "rev-parse", "HEAD")
+	if err != nil {
+		return "", "", fmt.Errorf("resolve host HEAD: %w", err)
+	}
+	head = strings.TrimSpace(head)
+	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(head) {
+		return "", "", fmt.Errorf("invalid host HEAD %q", head)
+	}
+	return branch, head, nil
+}
+
+func verifyClonedRepoHead(spriteName, repoDir, expectedHead string) error {
+	if expectedHead == "" {
+		return nil
+	}
+	cmd := `[ "$(git -C "$HOME/` + repoDir + `" rev-parse HEAD)" = "` + expectedHead + `" ]`
+	if err := spriteExec(spriteName, nil, true, "sh", "-lc", cmd); err != nil {
+		return fmt.Errorf("cloned Sprite HEAD does not match host HEAD %s; push the branch and retry", expectedHead)
+	}
+	return nil
 }
 
 func detectRepoInfo(spriteName string, opts upOptions) (string, string, string, error) {

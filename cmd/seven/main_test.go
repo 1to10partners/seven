@@ -154,6 +154,48 @@ func TestSevenUpGstackInstallsWhenFlagSet(t *testing.T) {
 	}
 }
 
+func TestSevenUpRejectsDirtyHostCheckout(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+	if err := os.WriteFile(filepath.Join(repo, "dirty.txt"), []byte("not committed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "host checkout is dirty") {
+		t.Fatalf("expected dirty host checkout to fail closed, err=%v output=%s", err, out)
+	}
+}
+
+func TestSevenUpRejectsStaleClonedHead(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		"SPRITE_EXEC_CLONED_HEAD_FAIL=1",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "cloned Sprite HEAD does not match host HEAD") {
+		t.Fatalf("expected stale remote branch to fail closed, err=%v output=%s", err, out)
+	}
+}
+
 func TestSevenUpGstackInstallsWhenProjectRequiresIt(t *testing.T) {
 	repo := createTempRepo(t)
 	state, logPath, cleanup := createFakeSprite(t)
@@ -2196,6 +2238,22 @@ func createTempRepo(t *testing.T) string {
 	if out, err := remote.CombinedOutput(); err != nil {
 		t.Fatalf("git remote add failed: %v\n%s", err, out)
 	}
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("fixture\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "README.md"}, {"commit", "-m", "fixture"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=Seven Tests",
+			"GIT_AUTHOR_EMAIL=seven-tests@example.com",
+			"GIT_COMMITTER_NAME=Seven Tests",
+			"GIT_COMMITTER_EMAIL=seven-tests@example.com",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
 	return repo
 }
 
@@ -2352,6 +2410,12 @@ case "$cmd" in
         fi
         exit 0
         ;;
+	  *"rev-parse HEAD"*)
+		if [ "${SPRITE_EXEC_CLONED_HEAD_FAIL:-}" = "1" ]; then
+		  exit 1
+		fi
+		exit 0
+		;;
 	  *"printf 'present'"*sprite-tooling.manifest*)
 		if [ "${SPRITE_EXEC_MANIFEST_PROBE_FAIL:-}" = "1" ]; then
 		  exit 1

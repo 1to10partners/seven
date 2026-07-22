@@ -60,7 +60,7 @@ seven list        # list this repo's sprite family and which one is selected (al
 
 Siblings are numbered consistently: the main sprite is **#1**, and `seven up --new` / `seven up N` / `seven list` all agree (the first sibling is `<repo>-02`). The repo is always cloned into a directory named after the project (e.g. `~/soclimmo`), regardless of which sibling sprite you're in.
 
-When creating a Sprite from a Git worktree, Seven clones the current host branch rather than only the repository's default branch. Push the branch first so a clean Sprite can reproduce cross-repository changes before merge.
+When creating a Sprite from a Git worktree, Seven clones the current host branch rather than only the repository's default branch. It refuses a dirty/detached host checkout and verifies the cloned HEAD is the exact host commit before provisioning. Commit and push the branch first so a clean Sprite can reproduce cross-repository changes before merge.
 
 To avoid confusion when switching between consoles, each sprite gets a **color-coded shell prompt** (bash, zsh, and fish) plus a one-line banner naming it on entry. The color is derived from the sprite name, so a given sprite always shows the same color and siblings stay visually distinct. Each sprite also defines a **`c` alias** for `claude --dangerously-skip-permissions` — sprites are disposable sandboxes, so running Claude with full permissions (no per-tool prompts, no folder-trust dialog) is the convenient default.
 
