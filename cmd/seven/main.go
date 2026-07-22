@@ -37,6 +37,7 @@ type upOptions struct {
 	NewSprite      bool
 	ResolvedName   string
 	InstallGstack  bool
+	FromHost       bool
 	SiblingOrdinal int
 }
 
@@ -164,8 +165,8 @@ func usage() {
 	fmt.Printf("version: %s\n", version)
 	fmt.Println()
 	fmt.Println("Usage:")
-	fmt.Println("  seven init [--assume-logged-in] [--new] [--sprite name] [--assistant codex|claude] [--gstack]")
-	fmt.Println("  seven up [N] [--assume-logged-in] [--new] [--sprite name] [--assistant codex|claude] [--no-console] [--no-tui] [--gstack]")
+	fmt.Println("  seven init [--assume-logged-in] [--new] [--sprite name] [--assistant codex|claude] [--gstack] [--from-host]")
+	fmt.Println("  seven up [N] [--assume-logged-in] [--new] [--sprite name] [--assistant codex|claude] [--no-console] [--no-tui] [--gstack] [--from-host]")
 	fmt.Println("  seven destroy [name] [--sprite name]")
 	fmt.Println("  seven status")
 	fmt.Println("  seven list")
@@ -204,6 +205,7 @@ func cmdUp(args []string) {
 	spriteName := fs.String("sprite", "", "use a specific sprite name")
 	assistant := fs.String("assistant", "", "preferred assistant: codex or claude")
 	gstack := fs.Bool("gstack", false, "install gstack (github.com/garrytan/gstack) into the sprite")
+	fromHost := fs.Bool("from-host", false, "clone the current pushed host branch and require its exact HEAD")
 
 	// An optional leading number (e.g. "seven up 2") selects sibling #N. It must
 	// come first so it is never confused with a flag value like "--sprite 2".
@@ -245,6 +247,7 @@ func cmdUp(args []string) {
 		SpriteName:     strings.TrimSpace(*spriteName),
 		NewSprite:      *newSprite,
 		InstallGstack:  *gstack,
+		FromHost:       *fromHost,
 		SiblingOrdinal: ordinal,
 	}
 	if shouldUseTUI {
@@ -282,6 +285,7 @@ func cmdInit(args []string) {
 	spriteName := fs.String("sprite", "", "use a specific sprite name")
 	assistant := fs.String("assistant", "", "preferred assistant: codex or claude")
 	gstack := fs.Bool("gstack", false, "install gstack (github.com/garrytan/gstack) into the sprite")
+	fromHost := fs.Bool("from-host", false, "clone the current pushed host branch and require its exact HEAD")
 	_ = fs.Parse(args)
 	if *newSprite && strings.TrimSpace(*spriteName) != "" {
 		fmt.Fprintln(os.Stderr, "seven init failed: --new and --sprite cannot be used together")
@@ -302,6 +306,7 @@ func cmdInit(args []string) {
 		SpriteName:     strings.TrimSpace(*spriteName),
 		NewSprite:      *newSprite,
 		InstallGstack:  *gstack,
+		FromHost:       *fromHost,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "seven init failed: %v\n", err)
@@ -606,14 +611,15 @@ func runInit(opts upOptions) (result upResult, returnErr error) {
 		return upResult{Name: name, OpenConsole: false, SpriteExists: true}, nil
 	}
 
-	// Resolve and preflight the host checkout before creating any external
-	// resource. A dirty/detached checkout must not leave an empty Sprite behind.
+	// By default, the host checkout identifies only the repository: a fresh
+	// Sprite clones the remote default branch. Exact host branch/HEAD coupling is
+	// an explicit escape hatch for testing pushed work before merge.
 	repoURL, repoSlug, ghToken, err := detectRepoInfo(name, opts)
 	if err != nil {
 		return upResult{}, err
 	}
 	repoBranch, repoHead := "", ""
-	if repoURL != "" {
+	if repoURL != "" && opts.FromHost {
 		repoBranch, repoHead, err = detectRepoCheckout(opts)
 		if err != nil {
 			return upResult{}, err

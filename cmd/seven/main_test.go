@@ -94,13 +94,24 @@ func TestSevenUpCreatesSpriteAndWritesFile(t *testing.T) {
 	if !strings.Contains(log, "gh repo clone") {
 		t.Fatalf("expected clone exec log, got: %s", log)
 	}
+	if strings.Contains(log, "-- --branch ") {
+		t.Fatalf("default provisioning must clone the remote default branch, got: %s", log)
+	}
+}
+
+func TestSevenUpFromHostClonesExactCurrentBranch(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	log := runSevenUpForLog(t, repo, state, logPath, nil, "--from-host")
 	branchCmd := exec.Command("git", "-C", repo, "symbolic-ref", "--quiet", "--short", "HEAD")
 	branchOut, err := branchCmd.Output()
 	if err != nil {
 		t.Fatalf("resolve test repo branch: %v", err)
 	}
 	if branch := strings.TrimSpace(string(branchOut)); !strings.Contains(log, "-- --branch "+branch) {
-		t.Fatalf("expected clone of current host branch %q, got: %s", branch, log)
+		t.Fatalf("expected --from-host clone of branch %q, got: %s", branch, log)
 	}
 }
 
@@ -157,7 +168,7 @@ func TestSevenUpGstackInstallsWhenFlagSet(t *testing.T) {
 	}
 }
 
-func TestSevenUpRejectsDirtyHostCheckout(t *testing.T) {
+func TestSevenUpIgnoresDirtyHostCheckoutByDefault(t *testing.T) {
 	repo := createTempRepo(t)
 	state, logPath, cleanup := createFakeSprite(t)
 	defer cleanup()
@@ -174,12 +185,38 @@ func TestSevenUpRejectsDirtyHostCheckout(t *testing.T) {
 		"SPRITE_LOG="+logPath,
 	)
 	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("default remote-first provisioning failed: %v output=%s", err, out)
+	}
+	logData, _ := os.ReadFile(logPath)
+	if !strings.Contains(string(logData), "create ") {
+		t.Fatalf("dirty host checkout should not affect default provisioning: %s", logData)
+	}
+}
+
+func TestSevenUpFromHostRejectsDirtyHostCheckout(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+	if err := os.WriteFile(filepath.Join(repo, "dirty.txt"), []byte("not committed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--from-host")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	out, err := cmd.CombinedOutput()
 	if err == nil || !strings.Contains(string(out), "host checkout is dirty") {
-		t.Fatalf("expected dirty host checkout to fail closed, err=%v output=%s", err, out)
+		t.Fatalf("expected --from-host dirty checkout to fail closed, err=%v output=%s", err, out)
 	}
 	logData, _ := os.ReadFile(logPath)
 	if strings.Contains(string(logData), "create ") {
-		t.Fatalf("dirty checkout should fail before Sprite creation: %s", logData)
+		t.Fatalf("dirty --from-host checkout should fail before Sprite creation: %s", logData)
 	}
 }
 
@@ -188,7 +225,7 @@ func TestSevenUpRejectsStaleClonedHead(t *testing.T) {
 	state, logPath, cleanup := createFakeSprite(t)
 	defer cleanup()
 
-	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console")
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console", "--from-host")
 	cmd.Dir = repo
 	cmd.Env = append(os.Environ(),
 		"HOME="+t.TempDir(),
@@ -204,7 +241,7 @@ func TestSevenUpRejectsStaleClonedHead(t *testing.T) {
 
 	// A failed first initialization must be recoverable: cleanup destroys the
 	// incomplete Sprite, so the next run creates and provisions from scratch.
-	retry := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console")
+	retry := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console", "--from-host")
 	retry.Dir = repo
 	retry.Env = append(os.Environ(),
 		"HOME="+t.TempDir(),
