@@ -1224,7 +1224,10 @@ bun install --frozen-lockfile
 ` + gstackPlaywrightPlatformCmd + `
 ` + gstackChromiumDepsCmd + `
 ./setup --host auto --no-team`
-	if out, err := spriteExecOutput(spriteName, nil, "sh", "-lc", install); err != nil {
+	// Gstack reconciliation can take minutes. Use the CLI's non-TTY HTTP
+	// transport so waking an existing Sprite does not depend on a long-lived
+	// WebSocket connection.
+	if out, err := spriteExecOutputHTTPPost(spriteName, nil, "sh", "-lc", install); err != nil {
 		return fmt.Errorf("gstack setup failed: %w%s", err, gstackOutputTail(out))
 	}
 	opts.Logger("[seven init] gstack installed")
@@ -2410,6 +2413,19 @@ func spriteExecOutput(spriteName string, env []string, args ...string) (string, 
 		return "", errors.New("sprite name is empty")
 	}
 	cmdArgs := []string{"exec", "-s", spriteName}
+	for _, kv := range env {
+		cmdArgs = append(cmdArgs, "-env", kv)
+	}
+	cmdArgs = append(cmdArgs, "--")
+	cmdArgs = append(cmdArgs, args...)
+	return runCmdOutput(spriteBin(), nil, cmdArgs...)
+}
+
+func spriteExecOutputHTTPPost(spriteName string, env []string, args ...string) (string, error) {
+	if spriteName == "" {
+		return "", errors.New("sprite name is empty")
+	}
+	cmdArgs := []string{"exec", "-s", spriteName, "--http-post"}
 	for _, kv := range env {
 		cmdArgs = append(cmdArgs, "-env", kv)
 	}
