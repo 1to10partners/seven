@@ -32,6 +32,7 @@ type upOptions struct {
 	QuietExternal  bool
 	AssumeLoggedIn bool
 	OpenConsole    bool
+	Assistant      string
 	SpriteName     string
 	NewSprite      bool
 	ResolvedName   string
@@ -88,6 +89,25 @@ const (
 	// Keep the default used by the explicit --gstack flag immutable. Projects
 	// may request another immutable revision in their tooling manifest.
 	gstackDefaultRevision = "a3259400a366593e0c909dd9ac3e59752efd2488"
+	// Playwright in the pinned gstack revision recognizes Ubuntu through 24.04.
+	// Sprite images currently report Ubuntu 26.04, whose Chromium build is ABI-
+	// compatible with Playwright's Ubuntu 24.04 payload but has no registry key.
+	// Apply Playwright's supported host override only for Ubuntu 26+ and only
+	// during gstack setup; leave every recognized platform untouched.
+	gstackPlaywrightPlatformCmd = `if [ "$(uname -s)" = "Linux" ] && [ -z "${PLAYWRIGHT_HOST_PLATFORM_OVERRIDE:-}" ] && [ -r /etc/os-release ]; then
+  . /etc/os-release
+  ubuntu_major="${VERSION_ID%%.*}"
+  if [ "${ID:-}" = "ubuntu" ] && case "$ubuntu_major" in ''|*[!0-9]*) false ;; *) [ "$ubuntu_major" -ge 26 ] ;; esac; then
+    case "$(uname -m)" in
+      x86_64|amd64) PLAYWRIGHT_HOST_PLATFORM_OVERRIDE="ubuntu24.04-x64" ;;
+      aarch64|arm64) PLAYWRIGHT_HOST_PLATFORM_OVERRIDE="ubuntu24.04-arm64" ;;
+    esac
+    if [ -n "${PLAYWRIGHT_HOST_PLATFORM_OVERRIDE:-}" ]; then
+      export PLAYWRIGHT_HOST_PLATFORM_OVERRIDE
+      echo "[seven] using Playwright $PLAYWRIGHT_HOST_PLATFORM_OVERRIDE compatibility build for Ubuntu $VERSION_ID"
+    fi
+  fi
+fi`
 	// gstackChromiumDepsCmd installs the OS shared libraries Chromium links
 	// against (libglib-2.0, libnss3, libgbm, …). gstack's ./setup downloads the
 	// browser *binary* but not these system libs, so on a minimal sprite image
@@ -144,8 +164,8 @@ func usage() {
 	fmt.Printf("version: %s\n", version)
 	fmt.Println()
 	fmt.Println("Usage:")
-	fmt.Println("  seven init [--assume-logged-in] [--new] [--sprite name] [--gstack]")
-	fmt.Println("  seven up [N] [--assume-logged-in] [--new] [--sprite name] [--no-console] [--no-tui] [--gstack]")
+	fmt.Println("  seven init [--assume-logged-in] [--new] [--sprite name] [--assistant codex|claude] [--gstack]")
+	fmt.Println("  seven up [N] [--assume-logged-in] [--new] [--sprite name] [--assistant codex|claude] [--no-console] [--no-tui] [--gstack]")
 	fmt.Println("  seven destroy [name] [--sprite name]")
 	fmt.Println("  seven status")
 	fmt.Println("  seven list")
@@ -165,6 +185,16 @@ func printVersion() {
 	fmt.Println(version)
 }
 
+func normalizeAssistant(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "codex", "claude":
+		return value, nil
+	default:
+		return "", fmt.Errorf("unsupported assistant %q (use codex or claude)", value)
+	}
+}
+
 func cmdUp(args []string) {
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
 	noTUI := fs.Bool("no-tui", false, "disable TUI output")
@@ -172,6 +202,7 @@ func cmdUp(args []string) {
 	noConsole := fs.Bool("no-console", false, "do not open sprite console after up")
 	newSprite := fs.Bool("new", false, "create and select a new sibling sprite")
 	spriteName := fs.String("sprite", "", "use a specific sprite name")
+	assistant := fs.String("assistant", "", "preferred assistant: codex or claude")
 	gstack := fs.Bool("gstack", false, "install gstack (github.com/garrytan/gstack) into the sprite")
 
 	// An optional leading number (e.g. "seven up 2") selects sibling #N. It must
@@ -197,6 +228,11 @@ func cmdUp(args []string) {
 		fmt.Fprintln(os.Stderr, "seven up failed: sprite number cannot be combined with --new or --sprite")
 		os.Exit(1)
 	}
+	preferredAssistant, err := normalizeAssistant(*assistant)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "seven up failed: %v\n", err)
+		os.Exit(1)
+	}
 
 	shouldUseTUI := !*noTUI
 	styleEnabled = shouldUseTUI
@@ -205,6 +241,7 @@ func cmdUp(args []string) {
 		QuietExternal:  false,
 		AssumeLoggedIn: *assumeLoggedIn,
 		OpenConsole:    !*noConsole,
+		Assistant:      preferredAssistant,
 		SpriteName:     strings.TrimSpace(*spriteName),
 		NewSprite:      *newSprite,
 		InstallGstack:  *gstack,
@@ -243,18 +280,25 @@ func cmdInit(args []string) {
 	assumeLoggedIn := fs.Bool("assume-logged-in", false, "skip sprite login")
 	newSprite := fs.Bool("new", false, "create and select a new sibling sprite")
 	spriteName := fs.String("sprite", "", "use a specific sprite name")
+	assistant := fs.String("assistant", "", "preferred assistant: codex or claude")
 	gstack := fs.Bool("gstack", false, "install gstack (github.com/garrytan/gstack) into the sprite")
 	_ = fs.Parse(args)
 	if *newSprite && strings.TrimSpace(*spriteName) != "" {
 		fmt.Fprintln(os.Stderr, "seven init failed: --new and --sprite cannot be used together")
 		os.Exit(1)
 	}
+	preferredAssistant, err := normalizeAssistant(*assistant)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "seven init failed: %v\n", err)
+		os.Exit(1)
+	}
 
-	_, err := runInit(upOptions{
+	_, err = runInit(upOptions{
 		Logger:         func(msg string) { fmt.Println(msg) },
 		QuietExternal:  false,
 		AssumeLoggedIn: *assumeLoggedIn,
 		OpenConsole:    false,
+		Assistant:      preferredAssistant,
 		SpriteName:     strings.TrimSpace(*spriteName),
 		NewSprite:      *newSprite,
 		InstallGstack:  *gstack,
@@ -1012,7 +1056,7 @@ func maybeUpgradeSpriteCLI(opts upOptions) {
 		opts.Logger("[seven up] could not parse sprite upgrade check output; skipping auto-upgrade")
 		return
 	}
-	if latest == current {
+	if spriteVersionsEqual(latest, current) {
 		opts.Logger(fmt.Sprintf("[seven up] sprite CLI is up to date (%s)", current))
 		return
 	}
@@ -1028,6 +1072,10 @@ func maybeUpgradeSpriteCLI(opts upOptions) {
 		return
 	}
 	opts.Logger(fmt.Sprintf("[seven up] sprite CLI upgraded to %s", latest))
+}
+
+func spriteVersionsEqual(left, right string) bool {
+	return strings.TrimPrefix(left, "v") == strings.TrimPrefix(right, "v")
 }
 
 func parseSpriteUpgradeCheckOutput(out string) (latest, current string, ok bool) {
@@ -1167,6 +1215,7 @@ gstack_staging=""
 rm -rf "$gstack_backup"
 cd "` + gstackSkillDir + `"
 bun install --frozen-lockfile
+` + gstackPlaywrightPlatformCmd + `
 ` + gstackChromiumDepsCmd + `
 ./setup --host auto --no-team`
 	if out, err := spriteExecOutput(spriteName, nil, "sh", "-lc", install); err != nil {
@@ -1323,9 +1372,9 @@ func parseProjectToolingManifest(contents string) (validatedToolingManifest, err
 			}
 			parts := strings.Split(packageSpec, "|")
 			if len(parts) != 6 || !toolingVersionPattern.MatchString(parts[0]) ||
-				!strings.HasPrefix(parts[1], "https://") || strings.Count(parts[1], "{arch}") != 1 ||
+				!validArchiveURLTemplate(parts[1]) ||
 				!sha256Pattern.MatchString(parts[2]) || !sha256Pattern.MatchString(parts[3]) ||
-				!toolingNamePattern.MatchString(parts[4]) {
+				!validArchiveMember(parts[4]) {
 				return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: malformed archive spec", index+1)
 			}
 			for _, alias := range strings.Split(parts[5], ",") {
@@ -1344,6 +1393,27 @@ func parseProjectToolingManifest(contents string) (validatedToolingManifest, err
 		manifest.rows = append(manifest.rows, strings.Join(fields, " "))
 	}
 	return manifest, nil
+}
+
+func validArchiveURLTemplate(value string) bool {
+	if !strings.HasPrefix(value, "https://") ||
+		strings.Count(value, "{arch}")+strings.Count(value, "{gnuarch}") != 1 {
+		return false
+	}
+	withoutKnown := strings.ReplaceAll(strings.ReplaceAll(value, "{arch}", ""), "{gnuarch}", "")
+	return !strings.ContainsAny(withoutKnown, "{}")
+}
+
+func validArchiveMember(value string) bool {
+	if value == "" || strings.HasPrefix(value, "/") {
+		return false
+	}
+	for _, component := range strings.Split(value, "/") {
+		if !toolingNamePattern.MatchString(component) {
+			return false
+		}
+	}
+	return true
 }
 
 // reconcileProjectEnvironment is the single provisioning path for new and
@@ -1413,30 +1483,47 @@ install_archive() {
   archive_name="$1" archive_spec="$2"
   old_ifs="$IFS"; IFS='|'; set -f; set -- $archive_spec; set +f; IFS="$old_ifs"
   [ "$#" -eq 6 ] || return 1
-  archive_version="$1" url_template="$2" sha_x86="$3" sha_arm="$4" archive_binary="$5" archive_aliases="$6"
+  archive_version="$1" url_template="$2" sha_x86="$3" sha_arm="$4" archive_member="$5" archive_aliases="$6"
   case "$url_template" in https://*) ;; *) return 1 ;; esac
   case "$sha_x86$sha_arm" in *[!0-9a-f]*) return 1 ;; esac
   [ "${#sha_x86}" -eq 64 ] && [ "${#sha_arm}" -eq 64 ] || return 1
-  case "$archive_binary$archive_aliases" in *[!A-Za-z0-9._,-]*) return 1 ;; esac
+  case "$archive_member" in ''|/*|*//*|*[!A-Za-z0-9._/-]*) return 1 ;; esac
+  old_ifs="$IFS"; IFS='/'; set -f; set -- $archive_member; set +f; IFS="$old_ifs"
+  for archive_component in "$@"; do
+    case "$archive_component" in [A-Za-z0-9]*) ;; *) return 1 ;; esac
+  done
+  case "$archive_aliases" in *[!A-Za-z0-9._,-]*) return 1 ;; esac
   case "$(uname -m)" in
-    x86_64|amd64) archive_arch="x86_64"; archive_sha="$sha_x86" ;;
-    aarch64|arm64) archive_arch="arm64"; archive_sha="$sha_arm" ;;
+    x86_64|amd64) archive_arch="x86_64"; archive_gnuarch="x86_64"; archive_sha="$sha_x86" ;;
+    aarch64|arm64) archive_arch="arm64"; archive_gnuarch="aarch64"; archive_sha="$sha_arm" ;;
     *) return 1 ;;
   esac
-  archive_url="$(printf '%s' "$url_template" | sed "s/{arch}/$archive_arch/g")"
+  archive_url="$(printf '%s' "$url_template" | sed "s/{arch}/$archive_arch/g; s/{gnuarch}/$archive_gnuarch/g")"
   archive_tmp="$(mktemp -d)" || return 1
+  archive_extracted="$archive_tmp/extracted"
   if ! curl -fsSL "$archive_url" -o "$archive_tmp/archive.tgz" ||
      ! printf '%s  %s\n' "$archive_sha" "$archive_tmp/archive.tgz" | sha256sum -c - >/dev/null 2>&1 ||
-     ! tar -xzf "$archive_tmp/archive.tgz" -C "$archive_tmp" "$archive_binary" >/dev/null 2>&1; then
+     ! archive_listing="$(tar -tvzf "$archive_tmp/archive.tgz" -- "$archive_member" 2>/dev/null)" ||
+     [ "$(printf '%s\n' "$archive_listing" | wc -l | tr -d ' ')" != 1 ] ||
+     [ "${archive_listing#-}" = "$archive_listing" ] ||
+     ! tar -xOzf "$archive_tmp/archive.tgz" -- "$archive_member" > "$archive_extracted" 2>/dev/null ||
+     [ ! -f "$archive_extracted" ]; then
     rm -rf "$archive_tmp"; return 1
   fi
   mkdir -p "$HOME/.local/bin" || { rm -rf "$archive_tmp"; return 1; }
-  install -m 0755 "$archive_tmp/$archive_binary" "$HOME/.local/bin/$archive_name" || {
-    rm -rf "$archive_tmp"; return 1;
-  }
   old_ifs="$IFS"; IFS=','; set -f; set -- $archive_aliases; set +f; IFS="$old_ifs"
   for archive_alias in "$@"; do
-    [ "$archive_alias" = "-" ] || ln -sf "$archive_name" "$HOME/.local/bin/$archive_alias" || {
+    if [ "$archive_alias" != "-" ] && [ -d "$HOME/.local/bin/$archive_alias" ] && [ ! -L "$HOME/.local/bin/$archive_alias" ]; then
+      rm -rf "$archive_tmp"; return 1
+    fi
+  done
+  install -m 0755 "$archive_extracted" "$HOME/.local/bin/$archive_name" || {
+    rm -rf "$archive_tmp"; return 1;
+  }
+  for archive_alias in "$@"; do
+    [ "$archive_alias" = "-" ] ||
+      { ln -sfn "$archive_name" "$HOME/.local/bin/$archive_alias" &&
+        [ "$(readlink "$HOME/.local/bin/$archive_alias")" = "$archive_name" ]; } || {
       rm -rf "$archive_tmp"; return 1;
     }
   done
@@ -1764,6 +1851,10 @@ func detectHostAssistantState(opts upOptions) hostAssistantState {
 	state.ClaudeCredentials = detectHostClaudeCredentials(opts)
 	state.CodexAuthPath = detectHostCodexChatGPTAuth(opts)
 	state.CodexConfigPath = detectHostCodexConfig(opts)
+	if opts.Assistant != "" {
+		state.PreferredAssistant = opts.Assistant
+		return state
+	}
 
 	switch {
 	case state.ClaudeAuthPath != "":
@@ -1797,6 +1888,9 @@ func syncHostAssistantState(spriteName string, state hostAssistantState, phase s
 }
 
 func resolvePreferredAssistantInSprite(spriteName string, state hostAssistantState, phase string, opts upOptions) string {
+	if opts.Assistant != "" {
+		return opts.Assistant
+	}
 	if loggedIn, err := spriteClaudeLoggedIn(spriteName); err != nil {
 		opts.Logger(fmt.Sprintf("%s claude auth validation failed: %v", phase, err))
 	} else if loggedIn {

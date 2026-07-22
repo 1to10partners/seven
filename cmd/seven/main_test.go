@@ -1,7 +1,10 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -276,6 +279,23 @@ func TestSevenUpGstackInstallsChromiumSystemDeps(t *testing.T) {
 	if deps > setup {
 		t.Fatalf("expected Chromium system-deps install before ./setup, got: %s", log)
 	}
+	for _, want := range []string{
+		`ubuntu_major="${VERSION_ID%%.*}"`,
+		`PLAYWRIGHT_HOST_PLATFORM_OVERRIDE="ubuntu24.04-x64"`,
+		`PLAYWRIGHT_HOST_PLATFORM_OVERRIDE="ubuntu24.04-arm64"`,
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("expected Ubuntu 26+ Playwright compatibility guard %q, got: %s", want, log)
+		}
+	}
+	compatibility := strings.Index(log, "gstackPlaywrightPlatformCmd")
+	if compatibility >= 0 {
+		t.Fatalf("expected expanded compatibility command, got identifier in log: %s", log)
+	}
+	override := strings.Index(log, "PLAYWRIGHT_HOST_PLATFORM_OVERRIDE")
+	if override < 0 || override > deps {
+		t.Fatalf("expected Playwright platform override before dependency install, got: %s", log)
+	}
 }
 
 func TestSevenUpSkipsGstackWithoutFlag(t *testing.T) {
@@ -326,21 +346,30 @@ func TestProjectToolingInstallScript(t *testing.T) {
 
 func TestValidateProjectToolingManifest(t *testing.T) {
 	sha := strings.Repeat("a", 40)
+	archiveSHA := strings.Repeat("b", 64)
 	validWithoutFinalNewline := "gstack gstack " + sha + " -\nnpm tool tool@1.2.3 tool --version\npip-module pynacl pynacl==1.6.2 nacl 1.6.2"
 	revision, err := validateProjectToolingManifest(validWithoutFinalNewline)
 	if err != nil || revision != sha {
 		t.Fatalf("expected valid newline-less manifest, revision=%q err=%v", revision, err)
 	}
+	validNestedArchive := "archive shellcheck v0.11.0|https://example.com/shellcheck-{gnuarch}.tar.gz|" + archiveSHA + "|" + archiveSHA + "|shellcheck-v0.11.0/shellcheck|- shellcheck --version"
+	if _, err := validateProjectToolingManifest(validNestedArchive); err != nil {
+		t.Fatalf("expected safe nested archive member and gnuarch template to validate: %v", err)
+	}
 	for name, manifest := range map[string]string{
-		"duplicate gstack": "gstack gstack " + sha + " -\ngstack gstack " + sha + " -\n",
-		"duplicate tool":   "npm tool tool@1.2.3 tool --version\npip tool tool==1.2.3 tool --version\n",
-		"alias collision":  "archive flyctl v0.4.60|https://example.com/fly_{arch}.tgz|" + strings.Repeat("b", 64) + "|" + strings.Repeat("c", 64) + "|flyctl|fly flyctl version\nnpm fly fly@1.2.3 fly --version\n",
-		"malformed gstack": "gstack gstack\n",
-		"unknown kind":     "script tool ignored tool --version\n",
-		"unpinned npm":     "npm tool tool@latest tool --version\n",
-		"unsafe verifier":  "npm tool tool@1.2.3 sh -c\n",
-		"shell builtin":    "npm eval eval@1.2.3 eval version\n",
-		"module mismatch":  "pip-module pynacl pynacl==1.6.2 nacl 1.6.1\n",
+		"duplicate gstack":    "gstack gstack " + sha + " -\ngstack gstack " + sha + " -\n",
+		"duplicate tool":      "npm tool tool@1.2.3 tool --version\npip tool tool==1.2.3 tool --version\n",
+		"alias collision":     "archive flyctl v0.4.60|https://example.com/fly_{arch}.tgz|" + strings.Repeat("b", 64) + "|" + strings.Repeat("c", 64) + "|flyctl|fly flyctl version\nnpm fly fly@1.2.3 fly --version\n",
+		"malformed gstack":    "gstack gstack\n",
+		"unknown kind":        "script tool ignored tool --version\n",
+		"unpinned npm":        "npm tool tool@latest tool --version\n",
+		"unsafe verifier":     "npm tool tool@1.2.3 sh -c\n",
+		"shell builtin":       "npm eval eval@1.2.3 eval version\n",
+		"module mismatch":     "pip-module pynacl pynacl==1.6.2 nacl 1.6.1\n",
+		"archive traversal":   "archive shellcheck v0.11.0|https://example.com/shellcheck-{gnuarch}.tar.gz|" + archiveSHA + "|" + archiveSHA + "|pkg/../shellcheck|- shellcheck --version\n",
+		"archive absolute":    "archive shellcheck v0.11.0|https://example.com/shellcheck-{gnuarch}.tar.gz|" + archiveSHA + "|" + archiveSHA + "|/pkg/shellcheck|- shellcheck --version\n",
+		"archive option":      "archive shellcheck v0.11.0|https://example.com/shellcheck-{gnuarch}.tar.gz|" + archiveSHA + "|" + archiveSHA + "|--checkpoint/pkg|- shellcheck --version\n",
+		"archive placeholder": "archive shellcheck v0.11.0|https://example.com/shellcheck-{platform}.tar.gz|" + archiveSHA + "|" + archiveSHA + "|pkg/shellcheck|- shellcheck --version\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := validateProjectToolingManifest(manifest); err == nil {
@@ -601,6 +630,195 @@ pip     ruff          ruff==0.15.18       ruff --version
 			t.Errorf("expected stale required tool to fail closed, err=%v output=%s", err, out)
 		}
 	})
+
+	t.Run("installs a checksum-verified nested archive member", func(t *testing.T) {
+		dir := t.TempDir()
+		binDir := filepath.Join(dir, "bin")
+		home := filepath.Join(dir, "home")
+		if err := os.MkdirAll(binDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		archivePath := filepath.Join(dir, "fixture.tar.gz")
+		var archive bytes.Buffer
+		gz := gzip.NewWriter(&archive)
+		tw := tar.NewWriter(gz)
+		content := []byte("#!/bin/sh\nprintf 'archive-tool 1.2.3\\n'\n")
+		if err := tw.WriteHeader(&tar.Header{Name: "pkg/archive-tool", Mode: 0o755, Size: int64(len(content)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(content); err != nil {
+			t.Fatal(err)
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := gz.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(archivePath, archive.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		sum := fmt.Sprintf("%x", sha256.Sum256(archive.Bytes()))
+		urlLog := filepath.Join(dir, "url.log")
+		writeExecutable(t, filepath.Join(binDir, "curl"), `#!/bin/sh
+url=""; out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+printf '%s\n' "$url" > "`+urlLog+`"
+/bin/cp "`+archivePath+`" "$out"
+`)
+		writeExecutable(t, filepath.Join(binDir, "uname"), "#!/bin/sh\nprintf 'x86_64\\n'\n")
+		manifest := "archive archive-tool 1.2.3|https://example.com/archive-{gnuarch}.tar.gz|" + sum + "|" + sum + "|pkg/archive-tool|- archive-tool --version\n"
+		sh, err := exec.LookPath("sh")
+		if err != nil {
+			t.Skip("sh not available")
+		}
+		cmd := exec.Command(sh, "-c", projectToolingInstallScript(manifest))
+		cmd.Env = []string{
+			"HOME=" + home,
+			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		}
+		out, err := cmd.CombinedOutput()
+		if err != nil || !strings.Contains(string(out), "installed: archive-tool") {
+			t.Fatalf("expected nested archive install, err=%v output=%s", err, out)
+		}
+		url, err := os.ReadFile(urlLog)
+		if err != nil || !strings.Contains(string(url), "archive-x86_64.tar.gz") {
+			t.Fatalf("expected gnuarch URL substitution, err=%v url=%q", err, url)
+		}
+		installed := filepath.Join(home, ".local", "bin", "archive-tool")
+		version, err := exec.Command(installed, "--version").CombinedOutput()
+		if err != nil || !strings.Contains(string(version), "1.2.3") {
+			t.Fatalf("installed nested member is not executable, err=%v output=%s", err, version)
+		}
+	})
+
+	t.Run("rejects ambiguous or non-regular archive members", func(t *testing.T) {
+		content := []byte("#!/bin/sh\nprintf 'archive-tool 1.2.3\\n'\n")
+		for name, entries := range map[string][]tarFixtureEntry{
+			"directory": {
+				{header: tar.Header{Name: "pkg/archive-tool/", Mode: 0o755, Typeflag: tar.TypeDir}},
+				{header: tar.Header{Name: "pkg/archive-tool/payload", Mode: 0o755, Typeflag: tar.TypeReg}, content: content},
+			},
+			"duplicate": {
+				{header: tar.Header{Name: "pkg/archive-tool", Mode: 0o755, Typeflag: tar.TypeReg}, content: content},
+				{header: tar.Header{Name: "pkg/archive-tool", Mode: 0o755, Typeflag: tar.TypeReg}, content: content},
+			},
+			"symlink": {
+				{header: tar.Header{Name: "pkg/archive-tool", Mode: 0o755, Typeflag: tar.TypeSymlink, Linkname: "payload"}},
+			},
+			"hardlink": {
+				{header: tar.Header{Name: "pkg/payload", Mode: 0o755, Typeflag: tar.TypeReg}, content: content},
+				{header: tar.Header{Name: "pkg/archive-tool", Mode: 0o755, Typeflag: tar.TypeLink, Linkname: "pkg/payload"}},
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				dir := t.TempDir()
+				archivePath := filepath.Join(dir, "fixture.tar.gz")
+				archiveBytes := writeTarFixture(t, archivePath, entries)
+				binDir := filepath.Join(dir, "bin")
+				if err := os.MkdirAll(binDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeArchiveTestCommands(t, binDir, archivePath)
+				sum := fmt.Sprintf("%x", sha256.Sum256(archiveBytes))
+				manifest := "archive archive-tool 1.2.3|https://example.com/archive-{arch}.tar.gz|" + sum + "|" + sum + "|pkg/archive-tool|- archive-tool --version\n"
+				out, err := runInstallScriptResult(t, projectToolingInstallScript(manifest), binDir)
+				if err == nil || !strings.Contains(out, "failed: archive-tool") {
+					t.Fatalf("expected %s archive member to fail closed, err=%v output=%s", name, err, out)
+				}
+			})
+		}
+	})
+
+	t.Run("rejects an archive alias that collides with a directory", func(t *testing.T) {
+		dir := t.TempDir()
+		archivePath := filepath.Join(dir, "fixture.tar.gz")
+		content := []byte("#!/bin/sh\nprintf 'archive-tool 1.2.3\\n'\n")
+		archiveBytes := writeTarFixture(t, archivePath, []tarFixtureEntry{{
+			header: tar.Header{Name: "archive-tool", Mode: 0o755, Typeflag: tar.TypeReg}, content: content,
+		}})
+		binDir := filepath.Join(dir, "bin")
+		if err := os.MkdirAll(binDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeArchiveTestCommands(t, binDir, archivePath)
+		home := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(home, ".local", "bin", "archive-alias"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		sum := fmt.Sprintf("%x", sha256.Sum256(archiveBytes))
+		manifest := "archive archive-tool 1.2.3|https://example.com/archive-{arch}.tar.gz|" + sum + "|" + sum + "|archive-tool|archive-alias archive-tool --version\n"
+		sh, err := exec.LookPath("sh")
+		if err != nil {
+			t.Skip("sh not available")
+		}
+		cmd := exec.Command(sh, "-c", projectToolingInstallScript(manifest))
+		cmd.Env = []string{"HOME=" + home, "PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH")}
+		out, err := cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "failed: archive-tool") {
+			t.Fatalf("expected alias-directory collision to fail closed, err=%v output=%s", err, out)
+		}
+		if _, err := os.Stat(filepath.Join(home, ".local", "bin", "archive-alias", "archive-tool")); !os.IsNotExist(err) {
+			t.Fatalf("alias collision created a nested link, err=%v", err)
+		}
+	})
+}
+
+type tarFixtureEntry struct {
+	header  tar.Header
+	content []byte
+}
+
+func writeTarFixture(t *testing.T, path string, entries []tarFixtureEntry) []byte {
+	t.Helper()
+	var archive bytes.Buffer
+	gz := gzip.NewWriter(&archive)
+	tw := tar.NewWriter(gz)
+	for _, entry := range entries {
+		header := entry.header
+		if header.Typeflag == tar.TypeReg {
+			header.Size = int64(len(entry.content))
+		}
+		if err := tw.WriteHeader(&header); err != nil {
+			t.Fatal(err)
+		}
+		if len(entry.content) > 0 {
+			if _, err := tw.Write(entry.content); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, archive.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return archive.Bytes()
+}
+
+func writeArchiveTestCommands(t *testing.T, binDir, archivePath string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "curl"), `#!/bin/sh
+out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+/bin/cp "`+archivePath+`" "$out"
+`)
+	writeExecutable(t, filepath.Join(binDir, "uname"), "#!/bin/sh\nprintf 'x86_64\\n'\n")
 }
 
 // writeExecutable writes an executable script to path (0o755) for use as a fake binary on PATH.
@@ -982,6 +1200,29 @@ func TestSevenUpExistingSpriteRefreshesConsoleBootstrap(t *testing.T) {
 	}
 }
 
+func TestSevenUpExplicitCodexAssistantOverridesUsableClaudeAuth(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	log := runSevenUpForLog(t, repo, state, logPath, []string{
+		`SPRITE_EXEC_CLAUDE_AUTH_STATUS_JSON={"loggedIn":true}`,
+	}, "--no-console", "--assistant", "codex")
+	if !strings.Contains(log, "SEVEN_ASSISTANT=codex") {
+		t.Fatalf("expected explicit Codex assistant to override usable Claude auth, got: %s", log)
+	}
+}
+
+func TestSevenUpRejectsUnknownAssistant(t *testing.T) {
+	repo := createTempRepo(t)
+	cmd := exec.Command(testSevenBin, "up", "--no-tui", "--assistant", "cursor")
+	cmd.Dir = repo
+	output, err := cmd.CombinedOutput()
+	if err == nil || !bytes.Contains(output, []byte(`unsupported assistant "cursor"`)) {
+		t.Fatalf("expected unsupported assistant error, err=%v output=%s", err, output)
+	}
+}
+
 func TestSevenUpLogsInWhenSpriteListFails(t *testing.T) {
 	repo := createTempRepo(t)
 	state, logPath, cleanup := createFakeSprite(t)
@@ -1068,6 +1309,34 @@ func TestSevenUpAutoUpgradesSpriteCLIWithNonInteractiveConfirmation(t *testing.T
 	}
 	if strings.Contains(string(logData), "upgrade (confirm failed)") {
 		t.Fatalf("expected upgrade confirmation to be provided, got: %s", logData)
+	}
+}
+
+func TestSevenUpTreatsLeadingVAsSameSpriteCLIVersion(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-console", "--no-tui")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		"SPRITE_UPGRADE_CHECK_LATEST=v0.0.1-rc46",
+		"SPRITE_UPGRADE_CHECK_CURRENT=0.0.1-rc46",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven up failed: %v\n%s", err, output)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	if strings.Count(string(logData), "upgrade ") != 1 {
+		t.Fatalf("expected only the upgrade check for equivalent versions, got: %s", logData)
 	}
 }
 
