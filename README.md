@@ -74,9 +74,10 @@ npm     vercel   vercel@54.12.2                      vercel --version
 pip     ruff     ruff==0.15.18                       ruff --version
 pip-module pynacl pynacl==1.6.2                      nacl 1.6.2
 archive flyctl   <version>|<https-url>|<sha-x86>|<sha-arm>|flyctl|fly  flyctl version
+archive shellcheck <version>|<https-url>|<sha-x86>|<sha-arm>|release-dir/shellcheck|- shellcheck --version
 ```
 
-Install is **idempotent**, exact-version verified, and fail-closed: every declared row is required, so a failed reconciliation blocks the console instead of presenting a partially provisioned Sprite. Archive rows require per-architecture SHA-256 checksums. A `gstack` row requires an immutable commit; Seven fetches it from the official origin into a fresh staging repository, atomically replaces the old checkout, and registers it for every supported assistant found in the Sprite. Repos without a manifest are unaffected. (Secrets are *not* handled here — tooling install only; credentials are a separate, project-owned concern.)
+Install is **idempotent**, exact-version verified, and fail-closed: every declared row is required, so a failed reconciliation blocks the console instead of presenting a partially provisioned Sprite. Archive rows require per-architecture SHA-256 checksums and may select a safe nested member. URL templates use `{arch}` (`x86_64`/`arm64`) or `{gnuarch}` (`x86_64`/`aarch64`). A `gstack` row requires an immutable commit; Seven fetches it from the official origin into a fresh staging repository, atomically replaces the old checkout, and registers it for every supported assistant found in the Sprite. Repos without a manifest are unaffected. (Secrets are *not* handled here — tooling install only; credentials are a separate, project-owned concern.)
 
 ### Assistant authentication
 Host assistant credentials are copied into the sprite **once, at creation**, mirroring how `gh` auth is bootstrapped. Subsequent `seven up`s do not re-sync — re-running config + auth uploads for both assistants on every reconnect added noticeable latency without changing the result for a working sprite.

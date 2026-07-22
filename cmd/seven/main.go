@@ -1372,9 +1372,9 @@ func parseProjectToolingManifest(contents string) (validatedToolingManifest, err
 			}
 			parts := strings.Split(packageSpec, "|")
 			if len(parts) != 6 || !toolingVersionPattern.MatchString(parts[0]) ||
-				!strings.HasPrefix(parts[1], "https://") || strings.Count(parts[1], "{arch}") != 1 ||
+				!validArchiveURLTemplate(parts[1]) ||
 				!sha256Pattern.MatchString(parts[2]) || !sha256Pattern.MatchString(parts[3]) ||
-				!toolingNamePattern.MatchString(parts[4]) {
+				!validArchiveMember(parts[4]) {
 				return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: malformed archive spec", index+1)
 			}
 			for _, alias := range strings.Split(parts[5], ",") {
@@ -1393,6 +1393,27 @@ func parseProjectToolingManifest(contents string) (validatedToolingManifest, err
 		manifest.rows = append(manifest.rows, strings.Join(fields, " "))
 	}
 	return manifest, nil
+}
+
+func validArchiveURLTemplate(value string) bool {
+	if !strings.HasPrefix(value, "https://") ||
+		strings.Count(value, "{arch}")+strings.Count(value, "{gnuarch}") != 1 {
+		return false
+	}
+	withoutKnown := strings.ReplaceAll(strings.ReplaceAll(value, "{arch}", ""), "{gnuarch}", "")
+	return !strings.ContainsAny(withoutKnown, "{}")
+}
+
+func validArchiveMember(value string) bool {
+	if value == "" || strings.HasPrefix(value, "/") {
+		return false
+	}
+	for _, component := range strings.Split(value, "/") {
+		if !toolingNamePattern.MatchString(component) {
+			return false
+		}
+	}
+	return true
 }
 
 // reconcileProjectEnvironment is the single provisioning path for new and
@@ -1462,30 +1483,47 @@ install_archive() {
   archive_name="$1" archive_spec="$2"
   old_ifs="$IFS"; IFS='|'; set -f; set -- $archive_spec; set +f; IFS="$old_ifs"
   [ "$#" -eq 6 ] || return 1
-  archive_version="$1" url_template="$2" sha_x86="$3" sha_arm="$4" archive_binary="$5" archive_aliases="$6"
+  archive_version="$1" url_template="$2" sha_x86="$3" sha_arm="$4" archive_member="$5" archive_aliases="$6"
   case "$url_template" in https://*) ;; *) return 1 ;; esac
   case "$sha_x86$sha_arm" in *[!0-9a-f]*) return 1 ;; esac
   [ "${#sha_x86}" -eq 64 ] && [ "${#sha_arm}" -eq 64 ] || return 1
-  case "$archive_binary$archive_aliases" in *[!A-Za-z0-9._,-]*) return 1 ;; esac
+  case "$archive_member" in ''|/*|*//*|*[!A-Za-z0-9._/-]*) return 1 ;; esac
+  old_ifs="$IFS"; IFS='/'; set -f; set -- $archive_member; set +f; IFS="$old_ifs"
+  for archive_component in "$@"; do
+    case "$archive_component" in [A-Za-z0-9]*) ;; *) return 1 ;; esac
+  done
+  case "$archive_aliases" in *[!A-Za-z0-9._,-]*) return 1 ;; esac
   case "$(uname -m)" in
-    x86_64|amd64) archive_arch="x86_64"; archive_sha="$sha_x86" ;;
-    aarch64|arm64) archive_arch="arm64"; archive_sha="$sha_arm" ;;
+    x86_64|amd64) archive_arch="x86_64"; archive_gnuarch="x86_64"; archive_sha="$sha_x86" ;;
+    aarch64|arm64) archive_arch="arm64"; archive_gnuarch="aarch64"; archive_sha="$sha_arm" ;;
     *) return 1 ;;
   esac
-  archive_url="$(printf '%s' "$url_template" | sed "s/{arch}/$archive_arch/g")"
+  archive_url="$(printf '%s' "$url_template" | sed "s/{arch}/$archive_arch/g; s/{gnuarch}/$archive_gnuarch/g")"
   archive_tmp="$(mktemp -d)" || return 1
+  archive_extracted="$archive_tmp/extracted"
   if ! curl -fsSL "$archive_url" -o "$archive_tmp/archive.tgz" ||
      ! printf '%s  %s\n' "$archive_sha" "$archive_tmp/archive.tgz" | sha256sum -c - >/dev/null 2>&1 ||
-     ! tar -xzf "$archive_tmp/archive.tgz" -C "$archive_tmp" "$archive_binary" >/dev/null 2>&1; then
+     ! archive_listing="$(tar -tvzf "$archive_tmp/archive.tgz" -- "$archive_member" 2>/dev/null)" ||
+     [ "$(printf '%s\n' "$archive_listing" | wc -l | tr -d ' ')" != 1 ] ||
+     [ "${archive_listing#-}" = "$archive_listing" ] ||
+     ! tar -xOzf "$archive_tmp/archive.tgz" -- "$archive_member" > "$archive_extracted" 2>/dev/null ||
+     [ ! -f "$archive_extracted" ]; then
     rm -rf "$archive_tmp"; return 1
   fi
   mkdir -p "$HOME/.local/bin" || { rm -rf "$archive_tmp"; return 1; }
-  install -m 0755 "$archive_tmp/$archive_binary" "$HOME/.local/bin/$archive_name" || {
-    rm -rf "$archive_tmp"; return 1;
-  }
   old_ifs="$IFS"; IFS=','; set -f; set -- $archive_aliases; set +f; IFS="$old_ifs"
   for archive_alias in "$@"; do
-    [ "$archive_alias" = "-" ] || ln -sf "$archive_name" "$HOME/.local/bin/$archive_alias" || {
+    if [ "$archive_alias" != "-" ] && [ -d "$HOME/.local/bin/$archive_alias" ] && [ ! -L "$HOME/.local/bin/$archive_alias" ]; then
+      rm -rf "$archive_tmp"; return 1
+    fi
+  done
+  install -m 0755 "$archive_extracted" "$HOME/.local/bin/$archive_name" || {
+    rm -rf "$archive_tmp"; return 1;
+  }
+  for archive_alias in "$@"; do
+    [ "$archive_alias" = "-" ] ||
+      { ln -sfn "$archive_name" "$HOME/.local/bin/$archive_alias" &&
+        [ "$(readlink "$HOME/.local/bin/$archive_alias")" = "$archive_name" ]; } || {
       rm -rf "$archive_tmp"; return 1;
     }
   done
