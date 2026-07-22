@@ -902,6 +902,41 @@ func TestSevenUpGstackReinstallsWhenAlreadyPresent(t *testing.T) {
 	}
 }
 
+func TestSevenUpExistingSpriteUsesHTTPPostForGstackReconcile(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	requiredGstack := []string{
+		"SPRITE_EXEC_PROJECT_MANIFEST=1",
+		"SPRITE_EXEC_GSTACK_REQUIRED=1",
+	}
+	_ = runSevenUpForLog(t, repo, state, logPath, requiredGstack, "--no-console")
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		"SPRITE_EXEC_PROJECT_MANIFEST=1",
+		"SPRITE_EXEC_GSTACK_REQUIRED=1",
+		"SPRITE_EXEC_REQUIRE_HTTP_POST_FOR_GSTACK=1",
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("existing Sprite gstack reconcile failed: %v\n%s", err, output)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	if !strings.Contains(string(logData), "--http-post -- sh -lc") {
+		t.Fatalf("expected gstack reconcile to use HTTP POST transport, got: %s", logData)
+	}
+}
+
 func TestSevenUpSkipsLoginWhenSpriteExists(t *testing.T) {
 	repo := t.TempDir()
 	state, logPath, cleanup := createFakeSprite(t)
@@ -2715,6 +2750,9 @@ case "$cmd" in
             shift
             shift || true
             ;;
+          --http-post)
+            shift
+            ;;
           *)
             break
             ;;
@@ -2724,6 +2762,19 @@ case "$cmd" in
         logit "exec (missing separator) $exec_args"
         exit 2
       fi
+    fi
+    if [ "${SPRITE_EXEC_REQUIRE_HTTP_POST_FOR_GSTACK:-}" = "1" ]; then
+      case "$exec_args" in
+        *garrytan/gstack*)
+          case " $exec_args " in
+            *" --http-post "*) ;;
+            *)
+              printf '%s\n' 'Error: connection closed' >&2
+              exit 1
+              ;;
+          esac
+          ;;
+      esac
     fi
     logit "exec $exec_args"
     case "$exec_args" in
