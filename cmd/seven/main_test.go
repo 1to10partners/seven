@@ -174,6 +174,10 @@ func TestSevenUpRejectsDirtyHostCheckout(t *testing.T) {
 	if err == nil || !strings.Contains(string(out), "host checkout is dirty") {
 		t.Fatalf("expected dirty host checkout to fail closed, err=%v output=%s", err, out)
 	}
+	logData, _ := os.ReadFile(logPath)
+	if strings.Contains(string(logData), "create ") {
+		t.Fatalf("dirty checkout should fail before Sprite creation: %s", logData)
+	}
 }
 
 func TestSevenUpRejectsStaleClonedHead(t *testing.T) {
@@ -193,6 +197,25 @@ func TestSevenUpRejectsStaleClonedHead(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	if err == nil || !strings.Contains(string(out), "cloned Sprite HEAD does not match host HEAD") {
 		t.Fatalf("expected stale remote branch to fail closed, err=%v output=%s", err, out)
+	}
+
+	// A failed first initialization must be recoverable: cleanup destroys the
+	// incomplete Sprite, so the next run creates and provisions from scratch.
+	retry := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console")
+	retry.Dir = repo
+	retry.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	if retryOut, retryErr := retry.CombinedOutput(); retryErr != nil {
+		t.Fatalf("retry after cleaned initialization failure: %v\n%s", retryErr, retryOut)
+	}
+	logData, _ := os.ReadFile(logPath)
+	log := string(logData)
+	if !strings.Contains(log, "destroy ") || strings.Count(log, "create ") < 2 {
+		t.Fatalf("expected failed Sprite cleanup followed by fresh creation: %s", log)
 	}
 }
 

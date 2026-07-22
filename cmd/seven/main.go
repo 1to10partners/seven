@@ -503,7 +503,7 @@ func runUp(opts upOptions) (upResult, error) {
 	return res, nil
 }
 
-func runInit(opts upOptions) (upResult, error) {
+func runInit(opts upOptions) (result upResult, returnErr error) {
 	if opts.Logger == nil {
 		opts.Logger = func(string) {}
 	}
@@ -562,6 +562,30 @@ func runInit(opts upOptions) (upResult, error) {
 		return upResult{Name: name, OpenConsole: false, SpriteExists: true}, nil
 	}
 
+	// Resolve and preflight the host checkout before creating any external
+	// resource. A dirty/detached checkout must not leave an empty Sprite behind.
+	repoURL, repoSlug, ghToken, err := detectRepoInfo(name, opts)
+	if err != nil {
+		return upResult{}, err
+	}
+	repoBranch, repoHead := "", ""
+	if repoURL != "" {
+		repoBranch, repoHead, err = detectRepoCheckout(opts)
+		if err != nil {
+			return upResult{}, err
+		}
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return upResult{}, err
+	}
+	spriteSelectionPath := filepath.Join(cwd, ".sprite")
+	previousSelection, selectionErr := os.ReadFile(spriteSelectionPath)
+	hadPreviousSelection := selectionErr == nil
+	if selectionErr != nil && !os.IsNotExist(selectionErr) {
+		return upResult{}, selectionErr
+	}
+
 	opts.Logger("[seven init] creating sprite")
 	if opts.QuietExternal {
 		if err := runCmdQuiet(spriteBin(), nil, "create", "--skip-console", name); err != nil {
@@ -570,6 +594,22 @@ func runInit(opts upOptions) (upResult, error) {
 	} else if err := runCmdDevNull(spriteBin(), nil, "create", "--skip-console", name); err != nil {
 		return upResult{}, err
 	}
+	defer func() {
+		if returnErr == nil {
+			return
+		}
+		opts.Logger(fmt.Sprintf("[seven init] initialization failed; destroying incomplete sprite: %s", name))
+		if cleanupErr := runCmd(spriteBin(), nil, "destroy", "--force", name); cleanupErr != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("destroy incomplete sprite %s: %w", name, cleanupErr))
+		}
+		if hadPreviousSelection {
+			if restoreErr := os.WriteFile(spriteSelectionPath, previousSelection, 0o644); restoreErr != nil {
+				returnErr = errors.Join(returnErr, fmt.Errorf("restore .sprite selection: %w", restoreErr))
+			}
+		} else if removeErr := os.Remove(spriteSelectionPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			returnErr = errors.Join(returnErr, fmt.Errorf("remove failed .sprite selection: %w", removeErr))
+		}
+	}()
 
 	opts.Logger("[seven init] writing .sprite")
 	if err := writeSpriteFile(name); err != nil {
@@ -580,10 +620,6 @@ func runInit(opts upOptions) (upResult, error) {
 		return upResult{}, err
 	}
 
-	repoURL, repoSlug, ghToken, err := detectRepoInfo(name, opts)
-	if err != nil {
-		return upResult{}, err
-	}
 	assistantState := detectHostAssistantState(opts)
 	if err := ensureGhAuthInSprite(name, ghToken, opts); err != nil {
 		opts.Logger(fmt.Sprintf("[seven init] gh auth setup failed: %v", err))
@@ -597,11 +633,6 @@ func runInit(opts upOptions) (upResult, error) {
 		opts.Logger("[seven init] no repo url found, skipping clone")
 		return upResult{Name: name, OpenConsole: false, SpriteExists: false}, nil
 	}
-	repoBranch, repoHead, err := detectRepoCheckout(opts)
-	if err != nil {
-		return upResult{}, err
-	}
-
 	// Clone into a directory named after the repo (the sprite family base), not
 	// the sprite name, so sibling sprites get "soclimmo" rather than "soclimmo-02".
 	repoDir := spriteFamilyBase(name)
