@@ -1143,9 +1143,17 @@ func gstackOutputTail(out string) string {
 // repo declares.
 const projectToolingManifestRelPath = "scripts/sprite-tooling.manifest"
 
-var toolingNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+var toolingNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 var toolingVersionPattern = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+$`)
 var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var forbiddenToolNames = map[string]bool{
+	"alias": true, "break": true, "cd": true, "command": true, "continue": true,
+	"echo": true, "eval": true, "exec": true, "export": true, "false": true,
+	"hash": true, "printf": true, "pwd": true, "read": true, "readonly": true,
+	"return": true, "set": true, "shift": true, "source": true, "test": true,
+	"times": true, "trap": true, "true": true, "type": true, "ulimit": true,
+	"umask": true, "unalias": true, "unset": true, "wait": true,
+}
 
 type validatedToolingManifest struct {
 	gstackRevision string
@@ -1161,8 +1169,17 @@ func (manifest validatedToolingManifest) normalized() string {
 // catches duplicate, malformed, unknown, and non-newline-terminated rows.
 func readProjectToolingManifest(spriteName, repoDir string) (validatedToolingManifest, bool, error) {
 	manifestPath := "$HOME/" + repoDir + "/" + projectToolingManifestRelPath
-	if err := spriteExec(spriteName, nil, true, "sh", "-lc", `test -f "`+manifestPath+`"`); err != nil {
+	presenceCmd := `if [ -f "` + manifestPath + `" ]; then printf 'present'; elif [ -e "` + manifestPath + `" ]; then exit 2; else printf 'absent'; fi`
+	presence, err := spriteExecOutput(spriteName, nil, "sh", "-lc", presenceCmd)
+	if err != nil {
+		return validatedToolingManifest{}, false, fmt.Errorf("probe project tooling manifest: %w", err)
+	}
+	switch strings.TrimSpace(presence) {
+	case "absent":
 		return validatedToolingManifest{}, false, nil
+	case "present":
+	default:
+		return validatedToolingManifest{}, false, fmt.Errorf("probe project tooling manifest: unexpected response %q", strings.TrimSpace(presence))
 	}
 	out, err := spriteExecOutput(spriteName, nil, "sh", "-lc", `cat "`+manifestPath+`"`)
 	if err != nil {
@@ -1214,7 +1231,7 @@ func parseProjectToolingManifest(contents string) (validatedToolingManifest, err
 			return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: expected five fields", index+1)
 		}
 		name, packageSpec, verifyName, verifyArg := fields[1], fields[2], fields[3], fields[4]
-		if !toolingNamePattern.MatchString(name) || verifyName != name || (verifyArg != "--version" && verifyArg != "version") {
+		if !toolingNamePattern.MatchString(name) || forbiddenToolNames[name] || verifyName != name || (verifyArg != "--version" && verifyArg != "version") {
 			return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: unsafe name or verifier", index+1)
 		}
 		if err := reserve(name, index+1); err != nil {
@@ -1302,7 +1319,10 @@ verify_pinned() {
     "$verify_name version") verify_arg="version" ;;
     *) return 1 ;;
   esac
-  verify_output="$("$verify_name" "$verify_arg" 2>&1)" || return 1
+  verify_path="$(command -v "$verify_name" 2>/dev/null)" || return 1
+  case "$verify_path" in /*) ;; *) return 1 ;; esac
+  [ -f "$verify_path" ] && [ -x "$verify_path" ] || return 1
+  verify_output="$("$verify_path" "$verify_arg" 2>&1)" || return 1
   set -f
   for verify_word in $verify_output; do
     case "$verify_word" in "$expected"|"v$expected") set +f; return 0 ;; esac
@@ -1355,14 +1375,14 @@ while read -r kind name spec verify || [ -n "$kind$name$spec$verify" ]; do
       case "$spec" in "$name"@[0-9]*.[0-9]*.[0-9]*) expected="${spec##*@}" ;; *) failed="$failed $name"; continue ;; esac
       case "$expected" in *[!0-9.]*|.*|*.|*.*.*.*) failed="$failed $name"; continue ;; esac
       if verify_pinned "$name" "$expected" "$verify"; then present="$present $name"
-      elif command -v npm >/dev/null 2>&1 && npm i -g "$spec" >/dev/null 2>&1 && verify_pinned "$name" "$expected" "$verify"; then installed="$installed $name"
+      elif command -v npm >/dev/null 2>&1 && npm i -g -- "$spec" >/dev/null 2>&1 && verify_pinned "$name" "$expected" "$verify"; then installed="$installed $name"
       else failed="$failed $name"; fi
       ;;
     pip)
       case "$spec" in "$name"==[0-9]*.[0-9]*.[0-9]*) expected="${spec##*==}" ;; *) failed="$failed $name"; continue ;; esac
       case "$expected" in *[!0-9.]*|.*|*.|*.*.*.*) failed="$failed $name"; continue ;; esac
       if verify_pinned "$name" "$expected" "$verify"; then present="$present $name"
-      elif command -v python3 >/dev/null 2>&1 && python3 -m pip install --user "$spec" >/dev/null 2>&1 && verify_pinned "$name" "$expected" "$verify"; then installed="$installed $name"
+      elif command -v python3 >/dev/null 2>&1 && python3 -m pip install --user -- "$spec" >/dev/null 2>&1 && verify_pinned "$name" "$expected" "$verify"; then installed="$installed $name"
       else failed="$failed $name"; fi
       ;;
     archive)

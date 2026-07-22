@@ -266,6 +266,7 @@ func TestValidateProjectToolingManifest(t *testing.T) {
 		"unknown kind":     "script tool ignored tool --version\n",
 		"unpinned npm":     "npm tool tool@latest tool --version\n",
 		"unsafe verifier":  "npm tool tool@1.2.3 sh -c\n",
+		"shell builtin":    "npm eval eval@1.2.3 eval version\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := validateProjectToolingManifest(manifest); err == nil {
@@ -395,6 +396,26 @@ func TestSevenUpSkipsProjectToolingWithoutManifest(t *testing.T) {
 	}
 }
 
+func TestSevenUpFailsClosedWhenManifestProbeErrors(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		"SPRITE_EXEC_MANIFEST_PROBE_FAIL=1",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "probe project tooling manifest") {
+		t.Fatalf("expected manifest probe failure to block Sprite, err=%v output=%s", err, out)
+	}
+}
+
 // TestProjectToolingInstallScriptBehavior actually *runs* the production install script (the same
 // string returned by projectToolingInstallScript) against a real /bin/sh, with fake npm + verify
 // binaries on PATH. Unlike the fake-sprite tests above — which only prove seven dispatches the
@@ -477,7 +498,7 @@ pip     ruff          ruff==0.15.18       ruff --version
 			t.Fatalf("reading npm log: %v", err)
 		}
 		log := string(data)
-		if !strings.Contains(log, "i -g missing-tool@2.0.0") {
+		if !strings.Contains(log, "i -g -- missing-tool@2.0.0") {
 			t.Errorf("expected npm install of pinned missing-tool spec, got npm log: %q", log)
 		}
 		if strings.Contains(log, "present-tool") {
@@ -2322,6 +2343,17 @@ case "$cmd" in
         fi
         exit 0
         ;;
+	  *"printf 'present'"*sprite-tooling.manifest*)
+		if [ "${SPRITE_EXEC_MANIFEST_PROBE_FAIL:-}" = "1" ]; then
+		  exit 1
+		fi
+		if [ "${SPRITE_EXEC_PROJECT_MANIFEST:-}" = "1" ] || [ "${SPRITE_EXEC_GSTACK_REQUIRED:-}" = "1" ]; then
+		  printf 'present'
+		else
+		  printf 'absent'
+		fi
+		exit 0
+		;;
 	  *SEVEN_TOOLING_MANIFEST*)
 		if [ "${SPRITE_EXEC_PROJECT_TOOLING_FAIL:-}" = "1" ]; then
 		  exit 1
