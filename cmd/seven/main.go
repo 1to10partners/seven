@@ -85,20 +85,21 @@ const (
 	sevenDefaultAssistant   = "codex"
 	gstackRepoURL           = "https://github.com/garrytan/gstack.git"
 	gstackSkillDir          = "$HOME/.claude/skills/gstack"
+	// Keep the default used by the explicit --gstack flag immutable. Projects
+	// may request another immutable revision in their tooling manifest.
+	gstackDefaultRevision = "a3259400a366593e0c909dd9ac3e59752efd2488"
 	// gstackChromiumDepsCmd installs the OS shared libraries Chromium links
 	// against (libglib-2.0, libnss3, libgbm, …). gstack's ./setup downloads the
 	// browser *binary* but not these system libs, so on a minimal sprite image
 	// Chromium exits 127 ("error while loading shared libraries: libglib-2.0.so.0")
 	// at launch and every browse command fails. We run this before ./setup so its
-	// own launch self-check passes. Linux + sudo gated; best-effort so non-Debian
-	// hosts (where playwright install-deps is unsupported) still proceed to setup.
-	// `bun x` runs the playwright CLI under bun, sidestepping the `#!/usr/bin/env
-	// node` shebang failing when node is absent from root's PATH under sudo; the
-	// preserved PATH lets sudo find bun itself.
+	// own launch self-check passes. Linux + sudo gated; failures propagate so a
+	// Sprite is never presented with a known-broken browser runtime.
+	// The executable comes from the revision's frozen lockfile, not a mutable
+	// registry resolution.
 	gstackChromiumDepsCmd = `if [ "$(uname -s)" = "Linux" ] && command -v sudo >/dev/null 2>&1; then
   echo "[seven] installing Chromium system dependencies (libglib-2.0, libnss3, …)"
-  sudo env "PATH=$PATH" bun x playwright install-deps chromium ||
-    echo "[seven] warning: could not install Chromium system deps; browse may fail to launch"
+  ./node_modules/.bin/playwright install-deps chromium
 fi`
 )
 
@@ -486,8 +487,8 @@ func runUp(opts upOptions) (upResult, error) {
 		if err := configureConsoleBootstrapInSprite(name, spriteFamilyBase(name), assistantState.PreferredAssistant, opts); err != nil {
 			opts.Logger(fmt.Sprintf("[seven up] console bootstrap setup failed: %v", err))
 		}
-		if err := maybeInstallGstack(name, assistantState.PreferredAssistant, opts); err != nil {
-			opts.Logger(fmt.Sprintf("[seven up] gstack install failed: %v", err))
+		if err := reconcileProjectEnvironment(name, spriteFamilyBase(name), assistantState.PreferredAssistant, opts); err != nil {
+			return upResult{}, err
 		}
 		return upResult{Name: name, OpenConsole: opts.OpenConsole, SpriteExists: true}, nil
 	}
@@ -502,7 +503,7 @@ func runUp(opts upOptions) (upResult, error) {
 	return res, nil
 }
 
-func runInit(opts upOptions) (upResult, error) {
+func runInit(opts upOptions) (result upResult, returnErr error) {
 	if opts.Logger == nil {
 		opts.Logger = func(string) {}
 	}
@@ -555,10 +556,34 @@ func runInit(opts upOptions) (upResult, error) {
 		if err := configureConsoleBootstrapInSprite(name, spriteFamilyBase(name), assistantState.PreferredAssistant, opts); err != nil {
 			opts.Logger(fmt.Sprintf("[seven init] console bootstrap setup failed: %v", err))
 		}
-		if err := maybeInstallGstack(name, assistantState.PreferredAssistant, opts); err != nil {
-			opts.Logger(fmt.Sprintf("[seven init] gstack install failed: %v", err))
+		if err := reconcileProjectEnvironment(name, spriteFamilyBase(name), assistantState.PreferredAssistant, opts); err != nil {
+			return upResult{}, err
 		}
 		return upResult{Name: name, OpenConsole: false, SpriteExists: true}, nil
+	}
+
+	// Resolve and preflight the host checkout before creating any external
+	// resource. A dirty/detached checkout must not leave an empty Sprite behind.
+	repoURL, repoSlug, ghToken, err := detectRepoInfo(name, opts)
+	if err != nil {
+		return upResult{}, err
+	}
+	repoBranch, repoHead := "", ""
+	if repoURL != "" {
+		repoBranch, repoHead, err = detectRepoCheckout(opts)
+		if err != nil {
+			return upResult{}, err
+		}
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return upResult{}, err
+	}
+	spriteSelectionPath := filepath.Join(cwd, ".sprite")
+	previousSelection, selectionErr := os.ReadFile(spriteSelectionPath)
+	hadPreviousSelection := selectionErr == nil
+	if selectionErr != nil && !os.IsNotExist(selectionErr) {
+		return upResult{}, selectionErr
 	}
 
 	opts.Logger("[seven init] creating sprite")
@@ -569,6 +594,22 @@ func runInit(opts upOptions) (upResult, error) {
 	} else if err := runCmdDevNull(spriteBin(), nil, "create", "--skip-console", name); err != nil {
 		return upResult{}, err
 	}
+	defer func() {
+		if returnErr == nil {
+			return
+		}
+		opts.Logger(fmt.Sprintf("[seven init] initialization failed; destroying incomplete sprite: %s", name))
+		if cleanupErr := runCmd(spriteBin(), nil, "destroy", "--force", name); cleanupErr != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("destroy incomplete sprite %s: %w", name, cleanupErr))
+		}
+		if hadPreviousSelection {
+			if restoreErr := os.WriteFile(spriteSelectionPath, previousSelection, 0o644); restoreErr != nil {
+				returnErr = errors.Join(returnErr, fmt.Errorf("restore .sprite selection: %w", restoreErr))
+			}
+		} else if removeErr := os.Remove(spriteSelectionPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			returnErr = errors.Join(returnErr, fmt.Errorf("remove failed .sprite selection: %w", removeErr))
+		}
+	}()
 
 	opts.Logger("[seven init] writing .sprite")
 	if err := writeSpriteFile(name); err != nil {
@@ -579,59 +620,73 @@ func runInit(opts upOptions) (upResult, error) {
 		return upResult{}, err
 	}
 
-	repoURL, repoSlug, ghToken, err := detectRepoInfo(name, opts)
-	if err != nil {
-		return upResult{}, err
-	}
 	assistantState := detectHostAssistantState(opts)
 	if err := ensureGhAuthInSprite(name, ghToken, opts); err != nil {
 		opts.Logger(fmt.Sprintf("[seven init] gh auth setup failed: %v", err))
 	}
 	assistantState = syncHostAssistantState(name, assistantState, "[seven init]", opts)
 
-	if err := maybeInstallGstack(name, assistantState.PreferredAssistant, opts); err != nil {
-		opts.Logger(fmt.Sprintf("[seven init] gstack install failed: %v", err))
-	}
-
 	if repoURL == "" {
+		if err := maybeInstallGstack(name, assistantState.PreferredAssistant, gstackDefaultRevision, opts); err != nil {
+			return upResult{}, fmt.Errorf("required gstack provisioning failed: %w", err)
+		}
 		opts.Logger("[seven init] no repo url found, skipping clone")
 		return upResult{Name: name, OpenConsole: false, SpriteExists: false}, nil
 	}
-
 	// Clone into a directory named after the repo (the sprite family base), not
 	// the sprite name, so sibling sprites get "soclimmo" rather than "soclimmo-02".
 	repoDir := spriteFamilyBase(name)
 
 	if repoSlug != "" {
+		cloneArgs := []string{"repo", "clone", repoSlug, repoDir}
+		if repoBranch != "" {
+			cloneArgs = append(cloneArgs, "--", "--branch", repoBranch)
+			opts.Logger(fmt.Sprintf("[seven init] cloning current host branch: %s", repoBranch))
+		}
 		if ghToken != "" {
 			opts.Logger(fmt.Sprintf("[seven init] cloning via gh repo clone: %s", repoSlug))
-			if err := spriteExec(name, []string{"GH_TOKEN=" + ghToken}, opts.QuietExternal, "gh", "repo", "clone", repoSlug, repoDir); err != nil {
+			commandArgs := append([]string{"gh"}, cloneArgs...)
+			if err := spriteExec(name, []string{"GH_TOKEN=" + ghToken}, opts.QuietExternal, commandArgs...); err != nil {
 				return upResult{}, err
 			}
 		} else {
 			opts.Logger(fmt.Sprintf("[seven init] cloning via gh repo clone (no token): %s", repoSlug))
-			if err := spriteExec(name, nil, opts.QuietExternal, "gh", "repo", "clone", repoSlug, repoDir); err != nil {
+			commandArgs := append([]string{"gh"}, cloneArgs...)
+			if err := spriteExec(name, nil, opts.QuietExternal, commandArgs...); err != nil {
 				return upResult{}, err
 			}
+		}
+		if err := verifyClonedRepoHead(name, repoDir, repoHead); err != nil {
+			return upResult{}, err
 		}
 		if err := configureConsoleBootstrapInSprite(name, repoDir, assistantState.PreferredAssistant, opts); err != nil {
 			opts.Logger(fmt.Sprintf("[seven init] console bootstrap setup failed: %v", err))
 		}
-		if err := maybeInstallProjectTooling(name, repoDir, opts); err != nil {
-			opts.Logger(fmt.Sprintf("[seven init] project tooling install failed: %v", err))
+		if err := reconcileProjectEnvironment(name, repoDir, assistantState.PreferredAssistant, opts); err != nil {
+			return upResult{}, err
 		}
 		return upResult{Name: name, OpenConsole: false, SpriteExists: false}, nil
 	}
 
 	opts.Logger(fmt.Sprintf("[seven init] cloning via git clone: %s", repoURL))
-	if err := spriteExec(name, nil, opts.QuietExternal, "git", "clone", repoURL, repoDir); err != nil {
+	cloneArgs := []string{"clone"}
+	if repoBranch != "" {
+		cloneArgs = append(cloneArgs, "--branch", repoBranch)
+		opts.Logger(fmt.Sprintf("[seven init] cloning current host branch: %s", repoBranch))
+	}
+	cloneArgs = append(cloneArgs, repoURL, repoDir)
+	commandArgs := append([]string{"git"}, cloneArgs...)
+	if err := spriteExec(name, nil, opts.QuietExternal, commandArgs...); err != nil {
+		return upResult{}, err
+	}
+	if err := verifyClonedRepoHead(name, repoDir, repoHead); err != nil {
 		return upResult{}, err
 	}
 	if err := configureConsoleBootstrapInSprite(name, name, assistantState.PreferredAssistant, opts); err != nil {
 		opts.Logger(fmt.Sprintf("[seven init] console bootstrap setup failed: %v", err))
 	}
-	if err := maybeInstallProjectTooling(name, repoDir, opts); err != nil {
-		opts.Logger(fmt.Sprintf("[seven init] project tooling install failed: %v", err))
+	if err := reconcileProjectEnvironment(name, repoDir, assistantState.PreferredAssistant, opts); err != nil {
+		return upResult{}, err
 	}
 
 	return upResult{Name: name, OpenConsole: false, SpriteExists: false}, nil
@@ -1068,40 +1123,52 @@ chmod 600 "` + sevenConsoleMarkerPath + `"
 	return spriteExec(spriteName, env, opts.QuietExternal, "sh", "-lc", cmd)
 }
 
-// maybeInstallGstack installs gstack (a Claude Code skill toolkit) inside the
-// sprite when requested via --gstack. It ensures Bun is available, then runs the
-// documented clone + setup. gstack's slash-commands only run inside Claude Code,
-// so it warns when Claude is not the resolved assistant, but still installs.
-func maybeInstallGstack(spriteName, assistant string, opts upOptions) error {
+// maybeInstallGstack installs gstack inside the sprite when explicitly requested
+// or declared by the repository tooling manifest. Setup targets every supported
+// assistant present in the sprite, so Claude Code and Codex share one checkout.
+func maybeInstallGstack(spriteName, assistant, revision string, opts upOptions) error {
 	if !opts.InstallGstack {
 		return nil
 	}
-
-	if assistant != "claude" {
-		opts.Logger("[seven init] gstack installed but its skills only run inside Claude Code (assistant: " + assistant + ")")
+	_ = assistant
+	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(revision) {
+		return fmt.Errorf("gstack revision must be a full commit SHA, got %q", revision)
 	}
 
 	if err := spriteExec(spriteName, nil, true, "sh", "-lc", "command -v bun >/dev/null 2>&1"); err != nil {
-		opts.Logger("[seven init] installing bun (gstack dependency)")
-		if out, err := spriteExecOutput(spriteName, nil, "sh", "-lc", "curl -fsSL https://bun.sh/install | bash"); err != nil {
-			return fmt.Errorf("bun install failed: %w%s", err, gstackOutputTail(out))
-		}
+		return fmt.Errorf("bun is required for gstack but is absent from the Sprite image")
 	}
 
-	// Clone if absent, otherwise refresh; either way (re-)run ./setup, which is
-	// idempotent and is also gstack's documented fix for a partial install. This
-	// lets a previously-failed setup (e.g. the browser download) be retried.
+	// Fetch and verify an immutable revision in a fresh staging repository. We
+	// never run Git or tool code through an existing checkout: even .git/config,
+	// the index, ignored dependencies, and generated binaries are untrusted.
 	opts.Logger("[seven init] installing gstack into sprite (includes a browser download; can take a few minutes)")
 	install := `set -e
-export PATH="$HOME/.bun/bin:$PATH"
-if [ -d "` + gstackSkillDir + `/.git" ]; then
-  git -C "` + gstackSkillDir + `" pull --ff-only || true
-else
-  git clone --single-branch --depth 1 ` + gstackRepoURL + ` "` + gstackSkillDir + `"
+export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
+gstack_parent="$(dirname "` + gstackSkillDir + `")"
+mkdir -p "$gstack_parent"
+gstack_staging="$(mktemp -d "$gstack_parent/.gstack-seven.XXXXXX")"
+gstack_backup="$gstack_parent/.gstack-seven-old"
+cleanup_gstack_staging() { [ -z "$gstack_staging" ] || rm -rf "$gstack_staging"; }
+trap cleanup_gstack_staging EXIT
+git -c core.hooksPath=/dev/null -C "$gstack_staging" init
+git -c core.hooksPath=/dev/null -C "$gstack_staging" remote add origin "` + gstackRepoURL + `"
+git -c core.hooksPath=/dev/null -C "$gstack_staging" fetch --depth 1 origin "` + revision + `"
+[ "$(git -c core.hooksPath=/dev/null -C "$gstack_staging" rev-parse FETCH_HEAD)" = "` + revision + `" ]
+git -c core.hooksPath=/dev/null -C "$gstack_staging" checkout --detach "` + revision + `"
+[ "$(git -c core.hooksPath=/dev/null -C "$gstack_staging" rev-parse HEAD)" = "` + revision + `" ]
+rm -rf "$gstack_backup"
+if [ -e "` + gstackSkillDir + `" ] || [ -L "` + gstackSkillDir + `" ]; then mv "` + gstackSkillDir + `" "$gstack_backup"; fi
+if ! mv "$gstack_staging" "` + gstackSkillDir + `"; then
+  if [ -e "$gstack_backup" ] || [ -L "$gstack_backup" ]; then mv "$gstack_backup" "` + gstackSkillDir + `"; fi
+  exit 1
 fi
+gstack_staging=""
+rm -rf "$gstack_backup"
 cd "` + gstackSkillDir + `"
+bun install --frozen-lockfile
 ` + gstackChromiumDepsCmd + `
-./setup`
+./setup --host auto --no-team`
 	if out, err := spriteExecOutput(spriteName, nil, "sh", "-lc", install); err != nil {
 		return fmt.Errorf("gstack setup failed: %w%s", err, gstackOutputTail(out))
 	}
@@ -1131,50 +1198,308 @@ func gstackOutputTail(out string) string {
 // repo declares.
 const projectToolingManifestRelPath = "scripts/sprite-tooling.manifest"
 
-// projectToolingInstallScript builds the shell that installs a project's declared tooling from
-// its manifest: idempotent verify-then-install of pinned npm globals (skip if `verify` already
-// passes). Pure (no I/O) so it is unit-testable.
-func projectToolingInstallScript(manifestPath string) string {
-	return `set -u
-MANIFEST="` + manifestPath + `"
-command -v npm >/dev/null 2>&1 || { echo "[project-tooling] npm not on PATH; skipping"; exit 0; }
-# npm's global bin dir (e.g. nvm's node bin) is only on PATH in an interactive shell; this script
-# runs non-interactively, so a freshly-installed tool's verify-command would not resolve and we'd
-# reinstall it on every run. Put the global bin dir on PATH first so verify-then-install is actually
-# idempotent.
-NPM_BIN="$(npm prefix -g 2>/dev/null)/bin"
-case ":$PATH:" in *":$NPM_BIN:"*) ;; *) PATH="$NPM_BIN:$PATH"; export PATH ;; esac
-present="" installed="" failed=""
-while read -r kind name spec verify; do
-  case "$kind" in ''|\#*) continue ;; esac
-  [ "$kind" = npm ] || continue
-  if eval "$verify" >/dev/null 2>&1; then present="$present $name"
-  elif npm i -g "$spec" >/dev/null 2>&1; then installed="$installed $name"
-  else failed="$failed $name"; fi
-done < "$MANIFEST"
-echo "[project-tooling] present:${present:- none} | installed:${installed:- none} | failed:${failed:- none}"`
+var toolingNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+var pythonModulePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var toolingVersionPattern = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+$`)
+var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var forbiddenToolNames = map[string]bool{
+	"alias": true, "break": true, "cd": true, "command": true, "continue": true,
+	"echo": true, "eval": true, "exec": true, "export": true, "false": true,
+	"hash": true, "printf": true, "pwd": true, "read": true, "readonly": true,
+	"return": true, "set": true, "shift": true, "source": true, "test": true,
+	"times": true, "trap": true, "true": true, "type": true, "ulimit": true,
+	"umask": true, "unalias": true, "unset": true, "wait": true,
 }
 
-// maybeInstallProjectTooling installs a freshly-cloned repo's declared CLI/MCP tooling into the
-// sprite, if the repo ships scripts/sprite-tooling.manifest. It mirrors a project's own
-// idempotent installer (pinned npm globals) so a fresh sprite is "born" with the project's tools
-// — without seven hardcoding any project's dependencies.
-//
-// Best-effort: a missing manifest is the common case (returns nil silently); a failing install is
-// logged by the caller and never blocks `seven up`.
-func maybeInstallProjectTooling(spriteName, repoDir string, opts upOptions) error {
-	manifest := "$HOME/" + repoDir + "/" + projectToolingManifestRelPath
-	// Most repos ship no manifest — a quick existence check, then quietly do nothing.
-	if err := spriteExec(spriteName, nil, true, "sh", "-lc", `test -f "`+manifest+`"`); err != nil {
+type validatedToolingManifest struct {
+	gstackRevision string
+	rows           []string
+}
+
+func (manifest validatedToolingManifest) normalized() string {
+	return strings.Join(manifest.rows, "\n")
+}
+
+// readProjectToolingManifest reads and validates the complete manifest before
+// any install mechanism runs. Parsing in Go avoids shell-evaluation hazards and
+// catches duplicate, malformed, unknown, and non-newline-terminated rows.
+func readProjectToolingManifest(spriteName, repoDir string) (validatedToolingManifest, bool, error) {
+	manifestPath := "$HOME/" + repoDir + "/" + projectToolingManifestRelPath
+	presenceCmd := `if [ -f "` + manifestPath + `" ]; then printf 'present'; elif [ -e "` + manifestPath + `" ]; then exit 2; else printf 'absent'; fi`
+	presence, err := spriteExecOutput(spriteName, nil, "sh", "-lc", presenceCmd)
+	if err != nil {
+		return validatedToolingManifest{}, false, fmt.Errorf("probe project tooling manifest: %w", err)
+	}
+	switch strings.TrimSpace(presence) {
+	case "absent":
+		return validatedToolingManifest{}, false, nil
+	case "present":
+	default:
+		return validatedToolingManifest{}, false, fmt.Errorf("probe project tooling manifest: unexpected response %q", strings.TrimSpace(presence))
+	}
+	out, err := spriteExecOutput(spriteName, nil, "sh", "-lc", `cat "`+manifestPath+`"`)
+	if err != nil {
+		return validatedToolingManifest{}, true, fmt.Errorf("read project tooling manifest: %w", err)
+	}
+	manifest, err := parseProjectToolingManifest(out)
+	if err != nil {
+		return validatedToolingManifest{}, true, err
+	}
+	return manifest, true, nil
+}
+
+func validateProjectToolingManifest(contents string) (string, error) {
+	manifest, err := parseProjectToolingManifest(contents)
+	return manifest.gstackRevision, err
+}
+
+func parseProjectToolingManifest(contents string) (validatedToolingManifest, error) {
+	manifest := validatedToolingManifest{}
+	reservedNames := map[string]bool{}
+	reserve := func(name string, line int) error {
+		if reservedNames[name] {
+			return fmt.Errorf("invalid project tooling manifest line %d: duplicate tool name or alias %q", line, name)
+		}
+		reservedNames[name] = true
 		return nil
 	}
-	opts.Logger("[seven init] project tooling manifest found — installing its pinned tools")
-	out, err := spriteExecOutput(spriteName, nil, "sh", "-lc", projectToolingInstallScript(manifest))
+
+	for index, raw := range strings.Split(contents, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		kind := fields[0]
+		if kind == "gstack" {
+			if len(fields) != 4 || fields[1] != "gstack" || fields[3] != "-" ||
+				!regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(fields[2]) {
+				return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: malformed gstack row", index+1)
+			}
+			if err := reserve("gstack", index+1); err != nil {
+				return validatedToolingManifest{}, err
+			}
+			manifest.gstackRevision = fields[2]
+			manifest.rows = append(manifest.rows, strings.Join(fields, " "))
+			continue
+		}
+		if len(fields) != 5 {
+			return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: expected five fields", index+1)
+		}
+		name, packageSpec, verifyName, verifyArg := fields[1], fields[2], fields[3], fields[4]
+		if !toolingNamePattern.MatchString(name) || forbiddenToolNames[name] {
+			return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: unsafe name", index+1)
+		}
+		if err := reserve(name, index+1); err != nil {
+			return validatedToolingManifest{}, err
+		}
+		switch kind {
+		case "npm":
+			if verifyName != name || (verifyArg != "--version" && verifyArg != "version") {
+				return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: unsafe verifier", index+1)
+			}
+			prefix := name + "@"
+			if !strings.HasPrefix(packageSpec, prefix) || !toolingVersionPattern.MatchString(strings.TrimPrefix(packageSpec, prefix)) {
+				return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: npm spec must be an exact name@version pin", index+1)
+			}
+		case "pip":
+			if verifyName != name || (verifyArg != "--version" && verifyArg != "version") {
+				return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: unsafe verifier", index+1)
+			}
+			prefix := name + "=="
+			if !strings.HasPrefix(packageSpec, prefix) || !toolingVersionPattern.MatchString(strings.TrimPrefix(packageSpec, prefix)) {
+				return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: pip spec must be an exact name==version pin", index+1)
+			}
+		case "pip-module":
+			prefix := name + "=="
+			version := strings.TrimPrefix(packageSpec, prefix)
+			if !strings.HasPrefix(packageSpec, prefix) || !toolingVersionPattern.MatchString(version) ||
+				!pythonModulePattern.MatchString(verifyName) || verifyArg != version {
+				return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: pip-module requires exact package, module, and matching version", index+1)
+			}
+		case "archive":
+			if verifyName != name || (verifyArg != "--version" && verifyArg != "version") {
+				return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: unsafe verifier", index+1)
+			}
+			parts := strings.Split(packageSpec, "|")
+			if len(parts) != 6 || !toolingVersionPattern.MatchString(parts[0]) ||
+				!strings.HasPrefix(parts[1], "https://") || strings.Count(parts[1], "{arch}") != 1 ||
+				!sha256Pattern.MatchString(parts[2]) || !sha256Pattern.MatchString(parts[3]) ||
+				!toolingNamePattern.MatchString(parts[4]) {
+				return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: malformed archive spec", index+1)
+			}
+			for _, alias := range strings.Split(parts[5], ",") {
+				if alias != "-" && !toolingNamePattern.MatchString(alias) {
+					return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: unsafe archive alias", index+1)
+				}
+				if alias != "-" {
+					if err := reserve(alias, index+1); err != nil {
+						return validatedToolingManifest{}, err
+					}
+				}
+			}
+		default:
+			return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: unsupported kind %q", index+1, kind)
+		}
+		manifest.rows = append(manifest.rows, strings.Join(fields, " "))
+	}
+	return manifest, nil
+}
+
+// reconcileProjectEnvironment is the single provisioning path for new and
+// existing sprites. Every seven up repairs missing gstack/browser artifacts and
+// reruns Seven's typed pinned-tool reconciler.
+func reconcileProjectEnvironment(spriteName, repoDir, assistant string, opts upOptions) error {
+	manifest, manifestPresent, err := readProjectToolingManifest(spriteName, repoDir)
+	if err != nil {
+		return err
+	}
+	revision := manifest.gstackRevision
+	required := revision != ""
+	reconcileOpts := opts
+	reconcileOpts.InstallGstack = opts.InstallGstack || required
+	if !required {
+		revision = gstackDefaultRevision
+	}
+	if err := maybeInstallGstack(spriteName, assistant, revision, reconcileOpts); err != nil {
+		return fmt.Errorf("required gstack provisioning failed: %w", err)
+	}
+	if err := maybeInstallProjectTooling(spriteName, manifest, manifestPresent, opts); err != nil {
+		return fmt.Errorf("required project tooling provisioning failed: %w", err)
+	}
+	return nil
+}
+
+// projectToolingInstallScript builds Seven's typed manifest interpreter. It
+// deliberately supports a small fixed set of install mechanisms and never evals
+// repository text. All declared rows are required: drift or install failure
+// returns non-zero and prevents entry into a partially provisioned Sprite.
+func projectToolingInstallScript(manifestContents string) string {
+	return `set -u
+PATH="$HOME/.local/bin:$PATH"
+export PATH
+if command -v npm >/dev/null 2>&1; then
+  NPM_BIN="$(npm prefix -g 2>/dev/null)/bin"
+  case ":$PATH:" in *":$NPM_BIN:"*) ;; *) PATH="$NPM_BIN:$PATH"; export PATH ;; esac
+fi
+present="" installed="" failed=""
+
+verify_pinned() {
+  verify_name="$1" expected="$2" verify="$3"
+  case "$verify" in
+    "$verify_name --version") verify_arg="--version" ;;
+    "$verify_name version") verify_arg="version" ;;
+    *) return 1 ;;
+  esac
+  verify_path="$(command -v "$verify_name" 2>/dev/null)" || return 1
+  case "$verify_path" in /*) ;; *) return 1 ;; esac
+  [ -f "$verify_path" ] && [ -x "$verify_path" ] || return 1
+  verify_output="$("$verify_path" "$verify_arg" 2>&1)" || return 1
+  set -f
+  for verify_word in $verify_output; do
+    case "$verify_word" in "$expected"|"v$expected") set +f; return 0 ;; esac
+  done
+  set +f
+  return 1
+}
+
+verify_python_module() {
+  module_dist="$1" module_name="$2" expected="$3"
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 -c 'import importlib.metadata as m, importlib.util, pathlib, sys; d=m.distribution(sys.argv[1]); s=importlib.util.find_spec(sys.argv[2]); owned={pathlib.Path(d.locate_file(f)).resolve() for f in (d.files or [])}; origin=pathlib.Path(s.origin).resolve() if s and s.origin else None; providers=[p.lower() for p in m.packages_distributions().get(sys.argv[2], [])]; raise SystemExit(d.version != sys.argv[3] or d.metadata["Name"].lower() not in providers or origin not in owned)' "$module_dist" "$module_name" "$expected" >/dev/null 2>&1
+}
+
+install_archive() {
+  archive_name="$1" archive_spec="$2"
+  old_ifs="$IFS"; IFS='|'; set -f; set -- $archive_spec; set +f; IFS="$old_ifs"
+  [ "$#" -eq 6 ] || return 1
+  archive_version="$1" url_template="$2" sha_x86="$3" sha_arm="$4" archive_binary="$5" archive_aliases="$6"
+  case "$url_template" in https://*) ;; *) return 1 ;; esac
+  case "$sha_x86$sha_arm" in *[!0-9a-f]*) return 1 ;; esac
+  [ "${#sha_x86}" -eq 64 ] && [ "${#sha_arm}" -eq 64 ] || return 1
+  case "$archive_binary$archive_aliases" in *[!A-Za-z0-9._,-]*) return 1 ;; esac
+  case "$(uname -m)" in
+    x86_64|amd64) archive_arch="x86_64"; archive_sha="$sha_x86" ;;
+    aarch64|arm64) archive_arch="arm64"; archive_sha="$sha_arm" ;;
+    *) return 1 ;;
+  esac
+  archive_url="$(printf '%s' "$url_template" | sed "s/{arch}/$archive_arch/g")"
+  archive_tmp="$(mktemp -d)" || return 1
+  if ! curl -fsSL "$archive_url" -o "$archive_tmp/archive.tgz" ||
+     ! printf '%s  %s\n' "$archive_sha" "$archive_tmp/archive.tgz" | sha256sum -c - >/dev/null 2>&1 ||
+     ! tar -xzf "$archive_tmp/archive.tgz" -C "$archive_tmp" "$archive_binary" >/dev/null 2>&1; then
+    rm -rf "$archive_tmp"; return 1
+  fi
+  mkdir -p "$HOME/.local/bin" || { rm -rf "$archive_tmp"; return 1; }
+  install -m 0755 "$archive_tmp/$archive_binary" "$HOME/.local/bin/$archive_name" || {
+    rm -rf "$archive_tmp"; return 1;
+  }
+  old_ifs="$IFS"; IFS=','; set -f; set -- $archive_aliases; set +f; IFS="$old_ifs"
+  for archive_alias in "$@"; do
+    [ "$archive_alias" = "-" ] || ln -sf "$archive_name" "$HOME/.local/bin/$archive_alias" || {
+      rm -rf "$archive_tmp"; return 1;
+    }
+  done
+  rm -rf "$archive_tmp"
+  return 0
+}
+
+while read -r kind name spec verify || [ -n "$kind$name$spec$verify" ]; do
+  case "$kind" in ''|\#*) continue ;; esac
+  [ "$kind" = gstack ] && continue
+  expected=""
+  case "$kind" in
+    npm)
+      case "$spec" in "$name"@[0-9]*.[0-9]*.[0-9]*) expected="${spec##*@}" ;; *) failed="$failed $name"; continue ;; esac
+      case "$expected" in *[!0-9.]*|.*|*.|*.*.*.*) failed="$failed $name"; continue ;; esac
+      if verify_pinned "$name" "$expected" "$verify"; then present="$present $name"
+      elif command -v npm >/dev/null 2>&1 && npm i -g -- "$spec" >/dev/null 2>&1 && verify_pinned "$name" "$expected" "$verify"; then installed="$installed $name"
+      else failed="$failed $name"; fi
+      ;;
+    pip)
+      case "$spec" in "$name"==[0-9]*.[0-9]*.[0-9]*) expected="${spec##*==}" ;; *) failed="$failed $name"; continue ;; esac
+      case "$expected" in *[!0-9.]*|.*|*.|*.*.*.*) failed="$failed $name"; continue ;; esac
+      if verify_pinned "$name" "$expected" "$verify"; then present="$present $name"
+      elif command -v python3 >/dev/null 2>&1 && python3 -m pip install --user -- "$spec" >/dev/null 2>&1 && verify_pinned "$name" "$expected" "$verify"; then installed="$installed $name"
+      else failed="$failed $name"; fi
+      ;;
+    pip-module)
+      expected="${spec##*==}"
+      old_ifs="$IFS"; IFS=' '; set -f; set -- $verify; set +f; IFS="$old_ifs"
+      module_name="$1"
+      if verify_python_module "$name" "$module_name" "$expected"; then present="$present $name"
+      elif command -v python3 >/dev/null 2>&1 && python3 -m pip install --user -- "$spec" >/dev/null 2>&1 && verify_python_module "$name" "$module_name" "$expected"; then installed="$installed $name"
+      else failed="$failed $name"; fi
+      ;;
+    archive)
+      expected="${spec%%|*}"
+      if verify_pinned "$name" "$expected" "$verify"; then present="$present $name"
+      elif install_archive "$name" "$spec" && verify_pinned "$name" "$expected" "$verify"; then installed="$installed $name"
+      else failed="$failed $name"; fi
+      ;;
+    *) failed="$failed $name" ;;
+  esac
+done <<'SEVEN_TOOLING_MANIFEST'
+` + manifestContents + `
+SEVEN_TOOLING_MANIFEST
+echo "[project-tooling] present:${present:- none} | installed:${installed:- none} | failed:${failed:- none}"
+[ -z "$failed" ]`
+}
+
+// maybeInstallProjectTooling reconciles a repo's declared CLI/MCP tooling using
+// Seven's typed interpreter. A missing manifest is the common no-op; a present
+// manifest is a required contract and failures propagate to the caller.
+func maybeInstallProjectTooling(spriteName string, manifest validatedToolingManifest, manifestPresent bool, opts upOptions) error {
+	if !manifestPresent {
+		return nil
+	}
+	opts.Logger("[seven up] project tooling manifest found — reconciling pinned tools")
+	out, err := spriteExecOutput(spriteName, nil, "sh", "-lc", projectToolingInstallScript(manifest.normalized()))
 	if err != nil {
 		return fmt.Errorf("project tooling install failed: %w%s", err, gstackOutputTail(out))
 	}
 	if s := strings.TrimSpace(out); s != "" {
-		opts.Logger("[seven init] " + s)
+		opts.Logger("[seven up] " + s)
 	}
 	return nil
 }
@@ -1294,6 +1619,55 @@ func spriteListedInOutput(out, name string) bool {
 		}
 	}
 	return false
+}
+
+// detectRepoCheckout returns a clean branch + commit identity. A dirty or
+// detached checkout cannot be reproduced by cloning and therefore must never
+// be used as evidence from a supposedly clean Sprite.
+func detectRepoCheckout(opts upOptions) (string, string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", "", err
+	}
+	dirty, err := runCmdOutput("git", nil, "-C", cwd, "status", "--porcelain", "--untracked-files=normal", "--", ".", ":(exclude).sprite")
+	if err != nil {
+		return "", "", fmt.Errorf("inspect host checkout: %w", err)
+	}
+	if strings.TrimSpace(dirty) != "" {
+		return "", "", fmt.Errorf("host checkout is dirty; commit and push it before creating a reproducible Sprite")
+	}
+	branch, err := runCmdOutput("git", nil, "-C", cwd, "symbolic-ref", "--quiet", "--short", "HEAD")
+	if err != nil {
+		return "", "", fmt.Errorf("host checkout is detached; use a pushed branch before creating a reproducible Sprite")
+	}
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return "", "", fmt.Errorf("host checkout has no branch")
+	}
+	if _, err := runCmdOutput("git", nil, "check-ref-format", "--branch", branch); err != nil {
+		opts.Logger(fmt.Sprintf("[seven init] ignoring invalid host branch %q", branch))
+		return "", "", fmt.Errorf("invalid host branch %q", branch)
+	}
+	head, err := runCmdOutput("git", nil, "-C", cwd, "rev-parse", "HEAD")
+	if err != nil {
+		return "", "", fmt.Errorf("resolve host HEAD: %w", err)
+	}
+	head = strings.TrimSpace(head)
+	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(head) {
+		return "", "", fmt.Errorf("invalid host HEAD %q", head)
+	}
+	return branch, head, nil
+}
+
+func verifyClonedRepoHead(spriteName, repoDir, expectedHead string) error {
+	if expectedHead == "" {
+		return nil
+	}
+	cmd := `[ "$(git -C "$HOME/` + repoDir + `" rev-parse HEAD)" = "` + expectedHead + `" ]`
+	if err := spriteExec(spriteName, nil, true, "sh", "-lc", cmd); err != nil {
+		return fmt.Errorf("cloned Sprite HEAD does not match host HEAD %s; push the branch and retry", expectedHead)
+	}
+	return nil
 }
 
 func detectRepoInfo(spriteName string, opts upOptions) (string, string, string, error) {

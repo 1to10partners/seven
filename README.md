@@ -60,19 +60,23 @@ seven list        # list this repo's sprite family and which one is selected (al
 
 Siblings are numbered consistently: the main sprite is **#1**, and `seven up --new` / `seven up N` / `seven list` all agree (the first sibling is `<repo>-02`). The repo is always cloned into a directory named after the project (e.g. `~/soclimmo`), regardless of which sibling sprite you're in.
 
+When creating a Sprite from a Git worktree, Seven clones the current host branch rather than only the repository's default branch. It refuses a dirty/detached host checkout and verifies the cloned HEAD is the exact host commit before provisioning. Commit and push the branch first so a clean Sprite can reproduce cross-repository changes before merge.
+
 To avoid confusion when switching between consoles, each sprite gets a **color-coded shell prompt** (bash, zsh, and fish) plus a one-line banner naming it on entry. The color is derived from the sprite name, so a given sprite always shows the same color and siblings stay visually distinct. Each sprite also defines **`c`** as `claude --dangerously-skip-permissions` and **`c2`** as `codex --dangerously-bypass-approvals-and-sandbox` — sprites are disposable sandboxes, so running assistants with full permissions (no per-tool prompts, no folder-trust dialog) is the convenient default.
 
 ### Project tooling (per-repo, no hardcoded deps)
-A repo can declare the CLIs/MCP servers its agent needs, and `seven` installs them into the sprite right after cloning — so a fresh sprite is "born" with the project's tools, with **no project-specific dependencies hardcoded in `seven`**. Opt in by committing a manifest at `scripts/sprite-tooling.manifest`, one tool per line:
+A repo can declare the CLIs/MCP servers its agent needs, and `seven` reconciles them after cloning and on every `seven up` — so a fresh sprite is "born" with the project's tools and an existing sprite repairs drift, with **no project-specific dependencies hardcoded in `seven`**. Opt in by committing a manifest at `scripts/sprite-tooling.manifest`, one tool per line. Seven supports only typed `npm`, `pip`, `pip-module`, `archive`, and `gstack` rows; it never executes a repository installer script.
 
 ```
-# kind  name          npm-spec (pinned)     verify-command
-npm     vercel        vercel@54.12.2        vercel --version
-npm     neonctl       neonctl@2.25.1        neonctl --version
-npm     langfuse-mcp  langfuse-mcp@1.2.0    langfuse-mcp --version
+# kind   name     pinned-spec                         verify-command
+gstack  gstack   <full-40-character-commit-sha>      -
+npm     vercel   vercel@54.12.2                      vercel --version
+pip     ruff     ruff==0.15.18                       ruff --version
+pip-module pynacl pynacl==1.6.2                      nacl 1.6.2
+archive flyctl   <version>|<https-url>|<sha-x86>|<sha-arm>|flyctl|fly  flyctl version
 ```
 
-Install is **idempotent** (each row is skipped when its `verify-command` already passes), pinned (supply-chain hygiene), and **best-effort** — a missing manifest is the common case and a failed install never blocks `seven up`. Repos without the manifest are unaffected. (Secrets are *not* handled here — tooling install only; credentials are a separate, project-owned concern.)
+Install is **idempotent**, exact-version verified, and fail-closed: every declared row is required, so a failed reconciliation blocks the console instead of presenting a partially provisioned Sprite. Archive rows require per-architecture SHA-256 checksums. A `gstack` row requires an immutable commit; Seven fetches it from the official origin into a fresh staging repository, atomically replaces the old checkout, and registers it for every supported assistant found in the Sprite. Repos without a manifest are unaffected. (Secrets are *not* handled here — tooling install only; credentials are a separate, project-owned concern.)
 
 ### Assistant authentication
 Host assistant credentials are copied into the sprite **once, at creation**, mirroring how `gh` auth is bootstrapped. Subsequent `seven up`s do not re-sync — re-running config + auth uploads for both assistants on every reconnect added noticeable latency without changing the result for a working sprite.
@@ -125,13 +129,13 @@ goreleaser release --snapshot --clean
 ```
 
 ### Install gstack
-[gstack](https://github.com/garrytan/gstack) is a Claude Code skill toolkit that lives outside the repo (in `~/.claude/skills/`), so each fresh sprite needs its own copy. Pass `--gstack` to install it during bootstrap:
+[gstack](https://github.com/garrytan/gstack) is a multi-host skill toolkit that lives outside the repo, so each fresh sprite needs its own copy. Repositories can declare it with a `gstack` row in `scripts/sprite-tooling.manifest`; for an undeclared repository, pass `--gstack`:
 
 ```sh
 seven up --gstack
 ```
 
-This ensures `bun` (its dependency) is present in the sprite, then runs gstack's documented `git clone … && ./setup`. The skills only run inside Claude Code, so seven warns if Claude isn't the resolved assistant, but installs regardless.
+The Sprite image must already provide Bun; Seven never bootstraps it with a remote shell script. Seven fetches and verifies an immutable gstack commit, cleans ignored build/dependency artifacts, installs its frozen lockfile, then runs `./setup --host auto --no-team`. Disabling team mode is intentional: its auto-updater would defeat the manifest pin. The same checkout registers skills for Claude Code, Codex, and any other supported host found in the Sprite. Re-running `seven up` reconciles a project-required install, including the browser payload.
 
 ## Features
 - **Core CLI:** `seven init`, `seven up`, `seven destroy`, `seven status`, `seven list`.

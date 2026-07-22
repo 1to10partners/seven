@@ -49,6 +49,7 @@ func TestSevenUpCreatesSpriteAndWritesFile(t *testing.T) {
 	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui")
 	cmd.Dir = repo
 	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
 		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"SPRITE_STATE="+state,
 		"SPRITE_LOG="+logPath,
@@ -90,6 +91,14 @@ func TestSevenUpCreatesSpriteAndWritesFile(t *testing.T) {
 	if !strings.Contains(log, "gh repo clone") {
 		t.Fatalf("expected clone exec log, got: %s", log)
 	}
+	branchCmd := exec.Command("git", "-C", repo, "symbolic-ref", "--quiet", "--short", "HEAD")
+	branchOut, err := branchCmd.Output()
+	if err != nil {
+		t.Fatalf("resolve test repo branch: %v", err)
+	}
+	if branch := strings.TrimSpace(string(branchOut)); !strings.Contains(log, "-- --branch "+branch) {
+		t.Fatalf("expected clone of current host branch %q, got: %s", branch, log)
+	}
 }
 
 // runSevenUpForLog runs `seven up` with the given extra flags/env against a fake
@@ -100,6 +109,7 @@ func runSevenUpForLog(t *testing.T, repo, state, logPath string, extraEnv []stri
 	cmd := exec.Command(testSevenBin, cmdArgs...)
 	cmd.Dir = repo
 	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
 		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"SPRITE_STATE="+state,
 		"SPRITE_LOG="+logPath,
@@ -127,6 +137,121 @@ func TestSevenUpGstackInstallsWhenFlagSet(t *testing.T) {
 	}
 	if strings.Contains(log, "bun.sh/install") {
 		t.Fatalf("expected no bun install when bun present, got: %s", log)
+	}
+	if !strings.Contains(log, "./setup --host auto --no-team") {
+		t.Fatalf("expected gstack setup for every installed assistant host, got: %s", log)
+	}
+	for _, want := range []string{
+		"mktemp -d \"$gstack_parent/.gstack-seven.XXXXXX\"",
+		"core.hooksPath=/dev/null",
+		"fetch --depth 1 origin \"" + gstackDefaultRevision + "\"",
+		"mv \"$gstack_staging\" \"$HOME/.claude/skills/gstack\"",
+		"bun install --frozen-lockfile",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("expected pinned gstack guard %q, got: %s", want, log)
+		}
+	}
+}
+
+func TestSevenUpRejectsDirtyHostCheckout(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+	if err := os.WriteFile(filepath.Join(repo, "dirty.txt"), []byte("not committed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "host checkout is dirty") {
+		t.Fatalf("expected dirty host checkout to fail closed, err=%v output=%s", err, out)
+	}
+	logData, _ := os.ReadFile(logPath)
+	if strings.Contains(string(logData), "create ") {
+		t.Fatalf("dirty checkout should fail before Sprite creation: %s", logData)
+	}
+}
+
+func TestSevenUpRejectsStaleClonedHead(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		"SPRITE_EXEC_CLONED_HEAD_FAIL=1",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "cloned Sprite HEAD does not match host HEAD") {
+		t.Fatalf("expected stale remote branch to fail closed, err=%v output=%s", err, out)
+	}
+
+	// A failed first initialization must be recoverable: cleanup destroys the
+	// incomplete Sprite, so the next run creates and provisions from scratch.
+	retry := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console")
+	retry.Dir = repo
+	retry.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+	)
+	if retryOut, retryErr := retry.CombinedOutput(); retryErr != nil {
+		t.Fatalf("retry after cleaned initialization failure: %v\n%s", retryErr, retryOut)
+	}
+	logData, _ := os.ReadFile(logPath)
+	log := string(logData)
+	if !strings.Contains(log, "destroy ") || strings.Count(log, "create ") < 2 {
+		t.Fatalf("expected failed Sprite cleanup followed by fresh creation: %s", log)
+	}
+}
+
+func TestSevenUpGstackInstallsWhenProjectRequiresIt(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	log := runSevenUpForLog(t, repo, state, logPath, []string{
+		"SPRITE_EXEC_PROJECT_MANIFEST=1",
+		"SPRITE_EXEC_GSTACK_REQUIRED=1",
+	})
+	if !strings.Contains(log, "garrytan/gstack") {
+		t.Fatalf("expected project-required gstack install without --gstack, got: %s", log)
+	}
+}
+
+func TestSevenUpRejectsUnpinnedProjectGstackRevision(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		"SPRITE_EXEC_PROJECT_MANIFEST=1",
+		"SPRITE_EXEC_GSTACK_REQUIRED=1",
+		"SPRITE_EXEC_GSTACK_REVISION=main",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "malformed gstack row") {
+		t.Fatalf("expected mutable gstack revision to fail closed, err=%v output=%s", err, out)
 	}
 }
 
@@ -164,24 +289,31 @@ func TestSevenUpSkipsGstackWithoutFlag(t *testing.T) {
 	}
 }
 
-func TestSevenUpGstackInstallsBunWhenMissing(t *testing.T) {
+func TestSevenUpGstackFailsClosedWhenBunMissing(t *testing.T) {
 	repo := createTempRepo(t)
 	state, logPath, cleanup := createFakeSprite(t)
 	defer cleanup()
 
-	log := runSevenUpForLog(t, repo, state, logPath, []string{"SPRITE_EXEC_BUN_MISSING=1"}, "--gstack")
-	if !strings.Contains(log, "bun.sh/install") {
-		t.Fatalf("expected bun install when bun missing, got: %s", log)
-	}
-	if !strings.Contains(log, "garrytan/gstack") {
-		t.Fatalf("expected gstack clone after bun install, got: %s", log)
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console", "--gstack")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		"SPRITE_EXEC_BUN_MISSING=1",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "bun is required") {
+		t.Fatalf("expected missing Bun to block provisioning, err=%v output=%s", err, out)
 	}
 }
 
 func TestProjectToolingInstallScript(t *testing.T) {
-	s := projectToolingInstallScript("$HOME/myrepo/scripts/sprite-tooling.manifest")
+	s := projectToolingInstallScript("npm tool tool@1.2.3 tool --version")
 	for _, want := range []string{
-		`MANIFEST="$HOME/myrepo/scripts/sprite-tooling.manifest"`,
+		"SEVEN_TOOLING_MANIFEST",
+		"npm tool tool@1.2.3 tool --version",
 		"command -v npm",
 		"npm i -g",
 		"[project-tooling]",
@@ -189,6 +321,32 @@ func TestProjectToolingInstallScript(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Fatalf("install script missing %q; got:\n%s", want, s)
 		}
+	}
+}
+
+func TestValidateProjectToolingManifest(t *testing.T) {
+	sha := strings.Repeat("a", 40)
+	validWithoutFinalNewline := "gstack gstack " + sha + " -\nnpm tool tool@1.2.3 tool --version\npip-module pynacl pynacl==1.6.2 nacl 1.6.2"
+	revision, err := validateProjectToolingManifest(validWithoutFinalNewline)
+	if err != nil || revision != sha {
+		t.Fatalf("expected valid newline-less manifest, revision=%q err=%v", revision, err)
+	}
+	for name, manifest := range map[string]string{
+		"duplicate gstack": "gstack gstack " + sha + " -\ngstack gstack " + sha + " -\n",
+		"duplicate tool":   "npm tool tool@1.2.3 tool --version\npip tool tool==1.2.3 tool --version\n",
+		"alias collision":  "archive flyctl v0.4.60|https://example.com/fly_{arch}.tgz|" + strings.Repeat("b", 64) + "|" + strings.Repeat("c", 64) + "|flyctl|fly flyctl version\nnpm fly fly@1.2.3 fly --version\n",
+		"malformed gstack": "gstack gstack\n",
+		"unknown kind":     "script tool ignored tool --version\n",
+		"unpinned npm":     "npm tool tool@latest tool --version\n",
+		"unsafe verifier":  "npm tool tool@1.2.3 sh -c\n",
+		"shell builtin":    "npm eval eval@1.2.3 eval version\n",
+		"module mismatch":  "pip-module pynacl pynacl==1.6.2 nacl 1.6.1\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := validateProjectToolingManifest(manifest); err == nil {
+				t.Fatalf("expected invalid manifest to fail: %q", manifest)
+			}
+		})
 	}
 }
 
@@ -221,6 +379,74 @@ func TestSevenUpInstallsProjectToolingWhenManifestPresent(t *testing.T) {
 	}
 }
 
+func TestSevenUpNeverRunsRepositoryToolingInstaller(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	log := runSevenUpForLog(t, repo, state, logPath, []string{
+		"SPRITE_EXEC_PROJECT_MANIFEST=1",
+		"SPRITE_EXEC_PROJECT_INSTALLER=1",
+	})
+	if strings.Contains(log, "sprite-tooling-install.sh") {
+		t.Fatalf("Seven must not execute repository scripts, got: %s", log)
+	}
+	if !strings.Contains(log, "npm i -g") {
+		t.Fatalf("expected Seven's typed manifest interpreter, got: %s", log)
+	}
+}
+
+func TestSevenUpBlocksNewSpriteWhenRequiredToolingFails(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		"SPRITE_EXEC_PROJECT_MANIFEST=1",
+		"SPRITE_EXEC_PROJECT_TOOLING_FAIL=1",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "required project tooling provisioning failed") {
+		t.Fatalf("expected required tooling failure to block new Sprite, err=%v output=%s", err, out)
+	}
+	logData, _ := os.ReadFile(logPath)
+	if strings.Contains(string(logData), "console -s") {
+		t.Fatalf("console must not open after required provisioning failure: %s", logData)
+	}
+}
+
+func TestSevenUpBlocksExistingSpriteWhenRequiredToolingFails(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	_ = runSevenUpForLog(t, repo, state, logPath, nil, "--no-console")
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		"SPRITE_EXEC_PROJECT_MANIFEST=1",
+		"SPRITE_EXEC_PROJECT_TOOLING_FAIL=1",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "required project tooling provisioning failed") {
+		t.Fatalf("expected required tooling failure to block existing Sprite, err=%v output=%s", err, out)
+	}
+	logData, _ := os.ReadFile(logPath)
+	if strings.Contains(string(logData), "console -s") {
+		t.Fatalf("console must not open after required provisioning failure: %s", logData)
+	}
+}
+
 func TestSevenUpSkipsProjectToolingWithoutManifest(t *testing.T) {
 	repo := createTempRepo(t)
 	state, logPath, cleanup := createFakeSprite(t)
@@ -244,17 +470,36 @@ func TestSevenUpSkipsProjectToolingWithoutManifest(t *testing.T) {
 	}
 }
 
+func TestSevenUpFailsClosedWhenManifestProbeErrors(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		"SPRITE_EXEC_MANIFEST_PROBE_FAIL=1",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "probe project tooling manifest") {
+		t.Fatalf("expected manifest probe failure to block Sprite, err=%v output=%s", err, out)
+	}
+}
+
 // TestProjectToolingInstallScriptBehavior actually *runs* the production install script (the same
 // string returned by projectToolingInstallScript) against a real /bin/sh, with fake npm + verify
 // binaries on PATH. Unlike the fake-sprite tests above — which only prove seven dispatches the
-// command — this exercises the script's real logic: idempotent skip, install-when-missing, failure
-// recording, non-npm-kind and comment skipping, and the npm-absent no-op.
+// command — this exercises the typed interpreter's real logic and exact-version reconciliation.
 func TestProjectToolingInstallScriptBehavior(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
 	}
 
-	t.Run("installs missing, skips present, records failures, ignores non-npm", func(t *testing.T) {
+	t.Run("installs missing npm and pip tools and skips exact versions", func(t *testing.T) {
 		dir := t.TempDir()
 		// pathDir is the script's entire PATH; gbin is the npm global bin dir, reachable ONLY via
 		// `npm prefix -g` (parent = dir, so dir/bin == gbin). present-tool lives in gbin only, so it
@@ -268,6 +513,8 @@ func TestProjectToolingInstallScriptBehavior(t *testing.T) {
 			t.Fatal(err)
 		}
 		npmLog := filepath.Join(dir, "npm.log")
+		missingState := filepath.Join(dir, "missing.installed")
+		pipState := filepath.Join(dir, "ruff.installed")
 
 		// Fake npm: report its global prefix as `dir` (so $prefix/bin == gbin), record every
 		// "i -g <spec>" call so we can assert exactly which pinned specs were installed, and fail
@@ -277,27 +524,38 @@ case "$1" in
   prefix) printf '%s\n' "`+dir+`"; exit 0 ;;
 esac
 printf '%s\n' "$*" >> "`+npmLog+`"
-case "$3" in
-  fail-tool@*) exit 1 ;;
-esac
+: > "`+missingState+`"
 exit 0
 `)
-		// present-tool's verify succeeds (its bin is in the global bin dir) → it must be skipped.
-		// missing-tool and fail-tool have no verify binary, so their verify fails → install attempted.
-		writeExecutable(t, filepath.Join(gbin, "present-tool"), "#!/bin/sh\nexit 0\n")
+		writeExecutable(t, filepath.Join(pathDir, "python3"), `#!/bin/sh
+: > "`+pipState+`"
+exit 0
+`)
+		writeExecutable(t, filepath.Join(gbin, "present-tool"), "#!/bin/sh\nprintf '1.0.0\\n'\n")
+		writeExecutable(t, filepath.Join(gbin, "missing-tool"), `#!/bin/sh
+[ -f "`+missingState+`" ] || exit 1
+printf '2.0.0\n'
+`)
+		writeExecutable(t, filepath.Join(pathDir, "ruff"), `#!/bin/sh
+[ -f "`+pipState+`" ] || exit 1
+printf 'ruff 0.15.18\n'
+`)
 
 		manifest := filepath.Join(dir, "sprite-tooling.manifest")
 		if err := os.WriteFile(manifest, []byte(`# a comment line is skipped
 
 npm     present-tool  present-tool@1.0.0  present-tool --version
 npm     missing-tool  missing-tool@2.0.0  missing-tool --version
-npm     fail-tool     fail-tool@3.0.0     fail-tool --version
-pip     ignored       ignored==4.0.0      ignored --version
+pip     ruff          ruff==0.15.18       ruff --version
 `), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
-		out := runInstallScript(t, projectToolingInstallScript(manifest), pathDir)
+		manifestData, err := os.ReadFile(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := runInstallScript(t, projectToolingInstallScript(string(manifestData)), pathDir)
 
 		if !strings.Contains(out, "present: present-tool") {
 			t.Errorf("expected present-tool reported present (verify resolved via npm global bin), got: %s", out)
@@ -305,8 +563,8 @@ pip     ignored       ignored==4.0.0      ignored --version
 		if !strings.Contains(out, "installed: missing-tool") {
 			t.Errorf("expected missing-tool reported installed, got: %s", out)
 		}
-		if !strings.Contains(out, "failed: fail-tool") {
-			t.Errorf("expected fail-tool reported failed, got: %s", out)
+		if !strings.Contains(out, "installed: missing-tool ruff") {
+			t.Errorf("expected missing npm and pip tools reported installed, got: %s", out)
 		}
 
 		data, err := os.ReadFile(npmLog)
@@ -314,34 +572,33 @@ pip     ignored       ignored==4.0.0      ignored --version
 			t.Fatalf("reading npm log: %v", err)
 		}
 		log := string(data)
-		if !strings.Contains(log, "i -g missing-tool@2.0.0") {
+		if !strings.Contains(log, "i -g -- missing-tool@2.0.0") {
 			t.Errorf("expected npm install of pinned missing-tool spec, got npm log: %q", log)
-		}
-		if !strings.Contains(log, "i -g fail-tool@3.0.0") {
-			t.Errorf("expected npm install attempt of fail-tool, got npm log: %q", log)
 		}
 		if strings.Contains(log, "present-tool") {
 			t.Errorf("present-tool verify passed; its npm install must be skipped, got npm log: %q", log)
 		}
-		if strings.Contains(log, "ignored") {
-			t.Errorf("non-npm kind must be ignored, got npm log: %q", log)
-		}
 	})
 
-	t.Run("no-op when npm is absent", func(t *testing.T) {
+	t.Run("wrong or unavailable required versions fail closed", func(t *testing.T) {
 		dir := t.TempDir()
-		binDir := filepath.Join(dir, "bin") // intentionally empty: no npm on PATH
+		binDir := filepath.Join(dir, "bin")
 		if err := os.MkdirAll(binDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
+		writeExecutable(t, filepath.Join(binDir, "tool"), "#!/bin/sh\nprintf '0.9.0\\n'\n")
 		manifest := filepath.Join(dir, "sprite-tooling.manifest")
 		if err := os.WriteFile(manifest, []byte("npm tool tool@1.0.0 tool --version\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
-		out := runInstallScript(t, projectToolingInstallScript(manifest), binDir)
-		if !strings.Contains(out, "npm not on PATH") {
-			t.Errorf("expected the npm-absent skip message, got: %s", out)
+		manifestData, readErr := os.ReadFile(manifest)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		out, err := runInstallScriptResult(t, projectToolingInstallScript(string(manifestData)), binDir)
+		if err == nil || !strings.Contains(out, "failed: tool") {
+			t.Errorf("expected stale required tool to fail closed, err=%v output=%s", err, out)
 		}
 	})
 }
@@ -358,17 +615,23 @@ func writeExecutable(t *testing.T, path, content string) {
 // only external commands it can reach are the fakes placed in binDir. Returns combined output.
 func runInstallScript(t *testing.T, script, binDir string) string {
 	t.Helper()
+	out, err := runInstallScriptResult(t, script, binDir)
+	if err != nil {
+		t.Fatalf("install script returned error: %v\n%s", err, out)
+	}
+	return out
+}
+
+func runInstallScriptResult(t *testing.T, script, binDir string) (string, error) {
+	t.Helper()
 	sh, err := exec.LookPath("sh")
 	if err != nil {
 		t.Skip("sh not available")
 	}
 	cmd := exec.Command(sh, "-c", script)
 	cmd.Env = []string{"PATH=" + binDir, "HOME=" + t.TempDir()}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("install script returned error: %v\n%s", err, out)
-	}
-	return string(out)
+	out, runErr := cmd.CombinedOutput()
+	return string(out), runErr
 }
 
 func TestSevenUpGstackReinstallsWhenAlreadyPresent(t *testing.T) {
@@ -2001,6 +2264,22 @@ func createTempRepo(t *testing.T) string {
 	if out, err := remote.CombinedOutput(); err != nil {
 		t.Fatalf("git remote add failed: %v\n%s", err, out)
 	}
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("fixture\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "README.md"}, {"commit", "-m", "fixture"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=Seven Tests",
+			"GIT_AUTHOR_EMAIL=seven-tests@example.com",
+			"GIT_COMMITTER_NAME=Seven Tests",
+			"GIT_COMMITTER_EMAIL=seven-tests@example.com",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
 	return repo
 }
 
@@ -2151,19 +2430,46 @@ case "$cmd" in
         fi
         exit 0
         ;;
-      *skills/gstack/.git*)
-        if [ "${SPRITE_EXEC_GSTACK_PRESENT:-}" = "1" ]; then
-          exit 0
-        fi
-        exit 1
-        ;;
       *"command -v bun"*)
         if [ "${SPRITE_EXEC_BUN_MISSING:-}" = "1" ]; then
           exit 1
         fi
         exit 0
         ;;
-      *sprite-tooling.manifest*)
+	  *"rev-parse HEAD"*)
+		if [ "${SPRITE_EXEC_CLONED_HEAD_FAIL:-}" = "1" ]; then
+		  exit 1
+		fi
+		exit 0
+		;;
+	  *"printf 'present'"*sprite-tooling.manifest*)
+		if [ "${SPRITE_EXEC_MANIFEST_PROBE_FAIL:-}" = "1" ]; then
+		  exit 1
+		fi
+		if [ "${SPRITE_EXEC_PROJECT_MANIFEST:-}" = "1" ] || [ "${SPRITE_EXEC_GSTACK_REQUIRED:-}" = "1" ]; then
+		  printf 'present'
+		else
+		  printf 'absent'
+		fi
+		exit 0
+		;;
+	  *SEVEN_TOOLING_MANIFEST*)
+		if [ "${SPRITE_EXEC_PROJECT_TOOLING_FAIL:-}" = "1" ]; then
+		  exit 1
+		fi
+		exit 0
+		;;
+	  *"cat \""*sprite-tooling.manifest*)
+		if [ -n "${SPRITE_EXEC_PROJECT_MANIFEST_CONTENT:-}" ]; then
+		  printf '%s' "$SPRITE_EXEC_PROJECT_MANIFEST_CONTENT"
+		elif [ "${SPRITE_EXEC_GSTACK_REQUIRED:-}" = "1" ]; then
+		  printf 'gstack gstack %s -\n' "${SPRITE_EXEC_GSTACK_REVISION:-a3259400a366593e0c909dd9ac3e59752efd2488}"
+		else
+		  printf 'npm tool tool@1.0.0 tool --version\n'
+		fi
+		exit 0
+		;;
+	  *sprite-tooling.manifest*)
         # Simulate a project tooling manifest being present/absent in the cloned repo.
         # Default: absent (exit 1), so most tests don't trigger the install path.
         if [ "${SPRITE_EXEC_PROJECT_MANIFEST:-}" = "1" ]; then
