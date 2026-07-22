@@ -91,6 +91,14 @@ func TestSevenUpCreatesSpriteAndWritesFile(t *testing.T) {
 	if !strings.Contains(log, "gh repo clone") {
 		t.Fatalf("expected clone exec log, got: %s", log)
 	}
+	branchCmd := exec.Command("git", "-C", repo, "symbolic-ref", "--quiet", "--short", "HEAD")
+	branchOut, err := branchCmd.Output()
+	if err != nil {
+		t.Fatalf("resolve test repo branch: %v", err)
+	}
+	if branch := strings.TrimSpace(string(branchOut)); !strings.Contains(log, "-- --branch "+branch) {
+		t.Fatalf("expected clone of current host branch %q, got: %s", branch, log)
+	}
 }
 
 // runSevenUpForLog runs `seven up` with the given extra flags/env against a fake

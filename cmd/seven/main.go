@@ -584,6 +584,7 @@ func runInit(opts upOptions) (upResult, error) {
 	if err != nil {
 		return upResult{}, err
 	}
+	repoBranch := detectRepoBranch(opts)
 	assistantState := detectHostAssistantState(opts)
 	if err := ensureGhAuthInSprite(name, ghToken, opts); err != nil {
 		opts.Logger(fmt.Sprintf("[seven init] gh auth setup failed: %v", err))
@@ -603,14 +604,21 @@ func runInit(opts upOptions) (upResult, error) {
 	repoDir := spriteFamilyBase(name)
 
 	if repoSlug != "" {
+		cloneArgs := []string{"repo", "clone", repoSlug, repoDir}
+		if repoBranch != "" {
+			cloneArgs = append(cloneArgs, "--", "--branch", repoBranch)
+			opts.Logger(fmt.Sprintf("[seven init] cloning current host branch: %s", repoBranch))
+		}
 		if ghToken != "" {
 			opts.Logger(fmt.Sprintf("[seven init] cloning via gh repo clone: %s", repoSlug))
-			if err := spriteExec(name, []string{"GH_TOKEN=" + ghToken}, opts.QuietExternal, "gh", "repo", "clone", repoSlug, repoDir); err != nil {
+			commandArgs := append([]string{"gh"}, cloneArgs...)
+			if err := spriteExec(name, []string{"GH_TOKEN=" + ghToken}, opts.QuietExternal, commandArgs...); err != nil {
 				return upResult{}, err
 			}
 		} else {
 			opts.Logger(fmt.Sprintf("[seven init] cloning via gh repo clone (no token): %s", repoSlug))
-			if err := spriteExec(name, nil, opts.QuietExternal, "gh", "repo", "clone", repoSlug, repoDir); err != nil {
+			commandArgs := append([]string{"gh"}, cloneArgs...)
+			if err := spriteExec(name, nil, opts.QuietExternal, commandArgs...); err != nil {
 				return upResult{}, err
 			}
 		}
@@ -624,7 +632,14 @@ func runInit(opts upOptions) (upResult, error) {
 	}
 
 	opts.Logger(fmt.Sprintf("[seven init] cloning via git clone: %s", repoURL))
-	if err := spriteExec(name, nil, opts.QuietExternal, "git", "clone", repoURL, repoDir); err != nil {
+	cloneArgs := []string{"clone"}
+	if repoBranch != "" {
+		cloneArgs = append(cloneArgs, "--branch", repoBranch)
+		opts.Logger(fmt.Sprintf("[seven init] cloning current host branch: %s", repoBranch))
+	}
+	cloneArgs = append(cloneArgs, repoURL, repoDir)
+	commandArgs := append([]string{"git"}, cloneArgs...)
+	if err := spriteExec(name, nil, opts.QuietExternal, commandArgs...); err != nil {
 		return upResult{}, err
 	}
 	if err := configureConsoleBootstrapInSprite(name, name, assistantState.PreferredAssistant, opts); err != nil {
@@ -1144,6 +1159,7 @@ func gstackOutputTail(out string) string {
 const projectToolingManifestRelPath = "scripts/sprite-tooling.manifest"
 
 var toolingNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+var pythonModulePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var toolingVersionPattern = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+$`)
 var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 var forbiddenToolNames = map[string]bool{
@@ -1258,7 +1274,7 @@ func parseProjectToolingManifest(contents string) (validatedToolingManifest, err
 			prefix := name + "=="
 			version := strings.TrimPrefix(packageSpec, prefix)
 			if !strings.HasPrefix(packageSpec, prefix) || !toolingVersionPattern.MatchString(version) ||
-				!toolingNamePattern.MatchString(verifyName) || verifyArg != version {
+				!pythonModulePattern.MatchString(verifyName) || verifyArg != version {
 				return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: pip-module requires exact package, module, and matching version", index+1)
 			}
 		case "archive":
@@ -1350,7 +1366,7 @@ verify_pinned() {
 verify_python_module() {
   module_dist="$1" module_name="$2" expected="$3"
   command -v python3 >/dev/null 2>&1 || return 1
-  python3 -c 'import importlib, importlib.metadata, sys; importlib.import_module(sys.argv[2]); raise SystemExit(importlib.metadata.version(sys.argv[1]) != sys.argv[3])' "$module_dist" "$module_name" "$expected" >/dev/null 2>&1
+  python3 -c 'import importlib.metadata as m, importlib.util, pathlib, sys; d=m.distribution(sys.argv[1]); s=importlib.util.find_spec(sys.argv[2]); owned={pathlib.Path(d.locate_file(f)).resolve() for f in (d.files or [])}; origin=pathlib.Path(s.origin).resolve() if s and s.origin else None; providers=[p.lower() for p in m.packages_distributions().get(sys.argv[2], [])]; raise SystemExit(d.version != sys.argv[3] or d.metadata["Name"].lower() not in providers or origin not in owned)' "$module_dist" "$module_name" "$expected" >/dev/null 2>&1
 }
 
 install_archive() {
@@ -1561,6 +1577,29 @@ func spriteListedInOutput(out, name string) bool {
 		}
 	}
 	return false
+}
+
+// detectRepoBranch returns the current host branch so a newly-created Sprite
+// starts on the same pushed feature branch. This is essential for testing
+// cross-repository provisioning changes before they merge to the default branch.
+func detectRepoBranch(opts upOptions) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	branch, err := runCmdOutput("git", nil, "-C", cwd, "symbolic-ref", "--quiet", "--short", "HEAD")
+	if err != nil {
+		return ""
+	}
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return ""
+	}
+	if _, err := runCmdOutput("git", nil, "check-ref-format", "--branch", branch); err != nil {
+		opts.Logger(fmt.Sprintf("[seven init] ignoring invalid host branch %q", branch))
+		return ""
+	}
+	return branch
 }
 
 func detectRepoInfo(spriteName string, opts upOptions) (string, string, string, error) {
