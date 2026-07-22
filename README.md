@@ -63,13 +63,14 @@ Siblings are numbered consistently: the main sprite is **#1**, and `seven up --n
 To avoid confusion when switching between consoles, each sprite gets a **color-coded shell prompt** (bash, zsh, and fish) plus a one-line banner naming it on entry. The color is derived from the sprite name, so a given sprite always shows the same color and siblings stay visually distinct. Each sprite also defines a **`c` alias** for `claude --dangerously-skip-permissions` — sprites are disposable sandboxes, so running Claude with full permissions (no per-tool prompts, no folder-trust dialog) is the convenient default.
 
 ### Project tooling (per-repo, no hardcoded deps)
-A repo can declare the CLIs/MCP servers its agent needs, and `seven` reconciles them after cloning and on every `seven up` — so a fresh sprite is "born" with the project's tools and an existing sprite repairs drift, with **no project-specific dependencies hardcoded in `seven`**. Opt in by committing a manifest at `scripts/sprite-tooling.manifest`, one tool per line. Seven supports only typed `npm`, `pip`, `archive`, and `gstack` rows; it never executes a repository installer script.
+A repo can declare the CLIs/MCP servers its agent needs, and `seven` reconciles them after cloning and on every `seven up` — so a fresh sprite is "born" with the project's tools and an existing sprite repairs drift, with **no project-specific dependencies hardcoded in `seven`**. Opt in by committing a manifest at `scripts/sprite-tooling.manifest`, one tool per line. Seven supports only typed `npm`, `pip`, `pip-module`, `archive`, and `gstack` rows; it never executes a repository installer script.
 
 ```
 # kind   name     pinned-spec                         verify-command
 gstack  gstack   <full-40-character-commit-sha>      -
 npm     vercel   vercel@54.12.2                      vercel --version
 pip     ruff     ruff==0.15.18                       ruff --version
+pip-module pynacl pynacl==1.6.2                      nacl 1.6.2
 archive flyctl   <version>|<https-url>|<sha-x86>|<sha-arm>|flyctl|fly  flyctl version
 ```
 

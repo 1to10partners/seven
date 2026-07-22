@@ -253,7 +253,7 @@ func TestProjectToolingInstallScript(t *testing.T) {
 
 func TestValidateProjectToolingManifest(t *testing.T) {
 	sha := strings.Repeat("a", 40)
-	validWithoutFinalNewline := "gstack gstack " + sha + " -\nnpm tool tool@1.2.3 tool --version"
+	validWithoutFinalNewline := "gstack gstack " + sha + " -\nnpm tool tool@1.2.3 tool --version\npip-module pynacl pynacl==1.6.2 nacl 1.6.2"
 	revision, err := validateProjectToolingManifest(validWithoutFinalNewline)
 	if err != nil || revision != sha {
 		t.Fatalf("expected valid newline-less manifest, revision=%q err=%v", revision, err)
@@ -267,6 +267,7 @@ func TestValidateProjectToolingManifest(t *testing.T) {
 		"unpinned npm":     "npm tool tool@latest tool --version\n",
 		"unsafe verifier":  "npm tool tool@1.2.3 sh -c\n",
 		"shell builtin":    "npm eval eval@1.2.3 eval version\n",
+		"module mismatch":  "pip-module pynacl pynacl==1.6.2 nacl 1.6.1\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := validateProjectToolingManifest(manifest); err == nil {

@@ -1231,24 +1231,40 @@ func parseProjectToolingManifest(contents string) (validatedToolingManifest, err
 			return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: expected five fields", index+1)
 		}
 		name, packageSpec, verifyName, verifyArg := fields[1], fields[2], fields[3], fields[4]
-		if !toolingNamePattern.MatchString(name) || forbiddenToolNames[name] || verifyName != name || (verifyArg != "--version" && verifyArg != "version") {
-			return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: unsafe name or verifier", index+1)
+		if !toolingNamePattern.MatchString(name) || forbiddenToolNames[name] {
+			return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: unsafe name", index+1)
 		}
 		if err := reserve(name, index+1); err != nil {
 			return validatedToolingManifest{}, err
 		}
 		switch kind {
 		case "npm":
+			if verifyName != name || (verifyArg != "--version" && verifyArg != "version") {
+				return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: unsafe verifier", index+1)
+			}
 			prefix := name + "@"
 			if !strings.HasPrefix(packageSpec, prefix) || !toolingVersionPattern.MatchString(strings.TrimPrefix(packageSpec, prefix)) {
 				return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: npm spec must be an exact name@version pin", index+1)
 			}
 		case "pip":
+			if verifyName != name || (verifyArg != "--version" && verifyArg != "version") {
+				return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: unsafe verifier", index+1)
+			}
 			prefix := name + "=="
 			if !strings.HasPrefix(packageSpec, prefix) || !toolingVersionPattern.MatchString(strings.TrimPrefix(packageSpec, prefix)) {
 				return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: pip spec must be an exact name==version pin", index+1)
 			}
+		case "pip-module":
+			prefix := name + "=="
+			version := strings.TrimPrefix(packageSpec, prefix)
+			if !strings.HasPrefix(packageSpec, prefix) || !toolingVersionPattern.MatchString(version) ||
+				!toolingNamePattern.MatchString(verifyName) || verifyArg != version {
+				return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: pip-module requires exact package, module, and matching version", index+1)
+			}
 		case "archive":
+			if verifyName != name || (verifyArg != "--version" && verifyArg != "version") {
+				return validatedToolingManifest{}, fmt.Errorf("invalid project tooling manifest line %d: unsafe verifier", index+1)
+			}
 			parts := strings.Split(packageSpec, "|")
 			if len(parts) != 6 || !toolingVersionPattern.MatchString(parts[0]) ||
 				!strings.HasPrefix(parts[1], "https://") || strings.Count(parts[1], "{arch}") != 1 ||
@@ -1331,6 +1347,12 @@ verify_pinned() {
   return 1
 }
 
+verify_python_module() {
+  module_dist="$1" module_name="$2" expected="$3"
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 -c 'import importlib, importlib.metadata, sys; importlib.import_module(sys.argv[2]); raise SystemExit(importlib.metadata.version(sys.argv[1]) != sys.argv[3])' "$module_dist" "$module_name" "$expected" >/dev/null 2>&1
+}
+
 install_archive() {
   archive_name="$1" archive_spec="$2"
   old_ifs="$IFS"; IFS='|'; set -f; set -- $archive_spec; set +f; IFS="$old_ifs"
@@ -1383,6 +1405,14 @@ while read -r kind name spec verify || [ -n "$kind$name$spec$verify" ]; do
       case "$expected" in *[!0-9.]*|.*|*.|*.*.*.*) failed="$failed $name"; continue ;; esac
       if verify_pinned "$name" "$expected" "$verify"; then present="$present $name"
       elif command -v python3 >/dev/null 2>&1 && python3 -m pip install --user -- "$spec" >/dev/null 2>&1 && verify_pinned "$name" "$expected" "$verify"; then installed="$installed $name"
+      else failed="$failed $name"; fi
+      ;;
+    pip-module)
+      expected="${spec##*==}"
+      old_ifs="$IFS"; IFS=' '; set -f; set -- $verify; set +f; IFS="$old_ifs"
+      module_name="$1"
+      if verify_python_module "$name" "$module_name" "$expected"; then present="$present $name"
+      elif command -v python3 >/dev/null 2>&1 && python3 -m pip install --user -- "$spec" >/dev/null 2>&1 && verify_python_module "$name" "$module_name" "$expected"; then installed="$installed $name"
       else failed="$failed $name"; fi
       ;;
     archive)
