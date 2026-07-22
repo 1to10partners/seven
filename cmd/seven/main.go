@@ -1183,9 +1183,9 @@ func maybeInstallProjectTooling(spriteName, repoDir string, opts upOptions) erro
 // one-line banner inside the sprite so it is obvious which sprite a console
 // belongs to. The color is derived from the sprite name (see spriteColor) and is
 // stable across sessions, so sibling sprites stay visually distinct. It also
-// defines a `c` alias for `claude --dangerously-skip-permissions` (safe in a
-// disposable sandbox). Snippets are written for bash, zsh, and fish and sourced
-// from the usual rc files.
+// defines assistant aliases for full-permission Claude and Codex sessions (safe
+// in a disposable sandbox). Snippets are written for bash, zsh, and fish and
+// sourced from the usual rc files.
 func configureSpriteIdentity(spriteName string, opts upOptions) error {
 	if spriteName == "" {
 		return nil
@@ -1199,11 +1199,12 @@ func configureSpriteIdentity(spriteName string, opts upOptions) error {
   printf 'SEVEN_SPRITE_NAME=%s\n' "$SEVEN_SPRITE_NAME"
   printf 'SEVEN_SPRITE_COLOR=%s\n' "$SEVEN_SPRITE_COLOR"
   cat <<'EOF'
-# seven sprite identity: colored prompt + banner + c alias
+# seven sprite identity: colored prompt + banner + assistant aliases
 case "$-" in
   *i*)
-    # Sprites are disposable sandboxes, so run Claude with full permissions.
+    # Sprites are disposable sandboxes, so run assistants with full permissions.
     alias c='claude --dangerously-skip-permissions'
+    alias c2='codex --dangerously-bypass-approvals-and-sandbox'
     if [ -z "${SEVEN_SPRITE_PROMPT_SET:-}" ]; then
       SEVEN_SPRITE_PROMPT_SET=1
       __seven_c="${SEVEN_SPRITE_COLOR:-7}"
@@ -1227,8 +1228,9 @@ install -d -m 700 "$HOME/.config/fish/conf.d"
   printf 'set -g __seven_sprite_color %s\n' "$SEVEN_SPRITE_COLOR"
   cat <<'EOF'
 status is-interactive; or exit 0
-# Sprites are disposable sandboxes, so run Claude with full permissions.
+# Sprites are disposable sandboxes, so run assistants with full permissions.
 alias c 'claude --dangerously-skip-permissions'
+alias c2 'codex --dangerously-bypass-approvals-and-sandbox'
 if not functions -q __seven_orig_fish_prompt
   if functions -q fish_prompt
     functions -c fish_prompt __seven_orig_fish_prompt
