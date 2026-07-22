@@ -1227,7 +1227,19 @@ bun install --frozen-lockfile
 	// Gstack reconciliation can take minutes. Use the CLI's non-TTY HTTP
 	// transport so waking an existing Sprite does not depend on a long-lived
 	// WebSocket connection.
-	if out, err := spriteExecOutputHTTPPost(spriteName, nil, "sh", "-lc", install); err != nil {
+	out, err := spriteExecOutputHTTPPost(spriteName, nil, "sh", "-lc", install)
+	if err != nil && strings.Contains(out, "Error: no exit frame received") {
+		// The Sprite CLI's HTTP POST transport can stream the complete command
+		// output and still exit 1 because it did not observe the protocol's final
+		// exit frame. Gstack setup is idempotent, so retry once over the regular
+		// transport: a completed first run becomes a quick verification pass,
+		// while a real setup failure remains fatal on the retry.
+		opts.Logger("[seven init] gstack transport lost its exit frame; retrying setup once")
+		retryOut, retryErr := spriteExecOutput(spriteName, nil, "sh", "-lc", install)
+		if retryErr != nil {
+			return fmt.Errorf("gstack setup retry failed after missing exit frame: %w%s", retryErr, gstackOutputTail(retryOut))
+		}
+	} else if err != nil {
 		return fmt.Errorf("gstack setup failed: %w%s", err, gstackOutputTail(out))
 	}
 	opts.Logger("[seven init] gstack installed")
