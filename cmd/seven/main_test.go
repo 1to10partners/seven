@@ -937,6 +937,112 @@ func TestSevenUpExistingSpriteUsesHTTPPostForGstackReconcile(t *testing.T) {
 	}
 }
 
+func TestSevenUpRetriesGstackWhenHTTPPostLosesExitFrame(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console", "--gstack")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		"SPRITE_EXEC_HTTP_POST_NO_EXIT_FRAME=1",
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("seven up should recover from a missing HTTP POST exit frame: %v\n%s", err, output)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	var gstackCalls []string
+	for _, line := range strings.Split(string(logData), "\n") {
+		if strings.Contains(line, "exec ") && strings.Contains(line, "-- sh -lc set -e") {
+			gstackCalls = append(gstackCalls, line)
+		}
+	}
+	if installs := strings.Count(string(logData), "remote add origin \"https://github.com/garrytan/gstack.git\""); installs != 2 {
+		t.Fatalf("expected one HTTP POST attempt and one regular retry, got %d installs: %s", installs, logData)
+	}
+	if len(gstackCalls) < 2 {
+		t.Fatalf("expected two gstack exec calls, got: %s", logData)
+	}
+	firstAttempt, retry := gstackCalls[len(gstackCalls)-2], gstackCalls[len(gstackCalls)-1]
+	if !strings.Contains(firstAttempt, "--http-post") {
+		t.Fatalf("expected first gstack attempt over HTTP POST, got: %s", firstAttempt)
+	}
+	if strings.Contains(retry, "--http-post") {
+		t.Fatalf("expected retry over the regular transport, got: %s", retry)
+	}
+}
+
+func TestSevenUpReportsGstackRetryFailureAfterMissingExitFrame(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console", "--gstack")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		"SPRITE_EXEC_HTTP_POST_NO_EXIT_FRAME=1",
+		"SPRITE_EXEC_REGULAR_GSTACK_FAILURE=1",
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected regular-transport retry failure, output=%s", output)
+	}
+	if !strings.Contains(string(output), "gstack setup retry failed after missing exit frame") {
+		t.Fatalf("expected retry failure context, got: %s", output)
+	}
+	if !strings.Contains(string(output), "regular gstack retry failure") {
+		t.Fatalf("expected retry output tail, got: %s", output)
+	}
+
+	logData, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("expected sprite log: %v", readErr)
+	}
+	if calls := strings.Count(string(logData), "garrytan/gstack"); calls != 2 {
+		t.Fatalf("expected one HTTP POST attempt and one regular retry, got %d calls: %s", calls, logData)
+	}
+}
+
+func TestSevenUpDoesNotRetryGstackForRealHTTPPostFailure(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-tui", "--no-console", "--gstack")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		"SPRITE_EXEC_HTTP_POST_GSTACK_FAILURE=1",
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "real gstack failure") {
+		t.Fatalf("expected real gstack failure to remain fatal, err=%v output=%s", err, output)
+	}
+
+	logData, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("expected sprite log: %v", readErr)
+	}
+	if calls := strings.Count(string(logData), "garrytan/gstack"); calls != 1 {
+		t.Fatalf("expected no retry for a real failure, got %d calls: %s", calls, logData)
+	}
+}
+
 func TestSevenUpSkipsLoginWhenSpriteExists(t *testing.T) {
 	repo := t.TempDir()
 	state, logPath, cleanup := createFakeSprite(t)
@@ -2777,6 +2883,36 @@ case "$cmd" in
       esac
     fi
     logit "exec $exec_args"
+	if [ "${SPRITE_EXEC_HTTP_POST_NO_EXIT_FRAME:-}" = "1" ]; then
+	  case " $exec_args " in
+		*" --http-post "*garrytan/gstack*)
+		  printf '%s\n' 'gstack setup output completed'
+		  printf '%s\n' 'Error: no exit frame received' >&2
+		  exit 1
+		  ;;
+	  esac
+	fi
+	if [ "${SPRITE_EXEC_HTTP_POST_GSTACK_FAILURE:-}" = "1" ]; then
+	  case " $exec_args " in
+		*" --http-post "*garrytan/gstack*)
+		  printf '%s\n' 'real gstack failure' >&2
+		  exit 1
+		  ;;
+	  esac
+	fi
+	if [ "${SPRITE_EXEC_REGULAR_GSTACK_FAILURE:-}" = "1" ]; then
+	  case " $exec_args " in
+		*garrytan/gstack*)
+		  case " $exec_args " in
+			*" --http-post "*) ;;
+			*)
+			  printf '%s\n' 'regular gstack retry failure' >&2
+			  exit 1
+			  ;;
+		  esac
+		  ;;
+	  esac
+	fi
     case "$exec_args" in
       *" -- claude auth status --json")
         if [ -n "${SPRITE_EXEC_CLAUDE_AUTH_STATUS_JSON:-}" ]; then
