@@ -44,7 +44,7 @@ cd /path/to/your/repo
 seven up
 ```
 
-On first run, `seven up` will prompt you to run `sprite login`, then create the sprite, and finally clone your repo and handle basic git setup. If host `codex` is logged in using ChatGPT, `seven init` also copies `~/.codex/auth.json` into the sprite so Codex is authenticated there. After clone, `seven init` configures one-shot console bootstrap for both Bash and Zsh so the first `sprite console` opens in the cloned repo and starts `codex`. On each `seven up`, the host `sprite` CLI is checked for updates and auto-upgraded when a newer version is available. Subsequent runs skip `init` and are therefore instant.
+On first run, `seven up` will prompt you to run `sprite login`, then create the sprite, and finally clone your repo and handle basic git setup. If host `codex` is logged in using ChatGPT, `seven init` also copies `~/.codex/auth.json` into the sprite so Codex is authenticated there. After clone, `seven init` configures one-shot console bootstrap for Bash, Zsh, and fish so the first `sprite console` opens in the cloned repo and suggests the selected assistant. Use `seven up --assistant codex` or `seven up --assistant claude` when both credentials exist and you want a deterministic choice. On each `seven up`, the host `sprite` CLI is checked for updates and auto-upgraded when a newer version is available. Subsequent runs skip `init` and are therefore instant.
 
 Once inside the sprite, cd into your folder and start your favorite assistant. The following come pre-installed: `claude`, `codex`, `cursor-agent`, and `gemini-cli`.
 
@@ -85,6 +85,8 @@ What's synced on the initial `seven up`:
 
 - **Claude Code:** seven syncs the real OAuth credential store, not just `~/.claude.json`. On Linux that's `~/.claude/.credentials.json`; on macOS the tokens live in the login Keychain (service `claude-code` / `Claude Code-credentials`), which seven extracts and writes into the sprite. (The Keychain read may show a one-time access prompt.) `~/.claude/settings.json` and `~/.claude.json` are deep-merged so sprite-only keys are preserved.
 - **Codex:** `~/.codex/auth.json` and `~/.codex/config.toml` are copied in.
+
+Seven copies both assistants' available credentials regardless of which one is selected. Without an explicit `--assistant`, it preserves the existing auto-detection behavior; pass `--assistant codex` or `--assistant claude` to choose the console hint deterministically.
 
 If a host token rotates and the sprite copy goes stale, run `claude` (or `codex login`) **inside the sprite** to re-auth — the same recovery path used for `gh`. Note that the host and a sprite share one refresh token, so a refresh on one side can occasionally invalidate the other ("token has already been used"); the fix is the same in-sprite re-login.
 
@@ -136,6 +138,8 @@ seven up --gstack
 ```
 
 The Sprite image must already provide Bun; Seven never bootstraps it with a remote shell script. Seven fetches and verifies an immutable gstack commit, cleans ignored build/dependency artifacts, installs its frozen lockfile, then runs `./setup --host auto --no-team`. Disabling team mode is intentional: its auto-updater would defeat the manifest pin. The same checkout registers skills for Claude Code, Codex, and any other supported host found in the Sprite. Re-running `seven up` reconciles a project-required install, including the browser payload.
+
+Sprite images newer than Playwright's recognized Ubuntu matrix use Playwright's supported Ubuntu 24.04 compatibility build during setup. The override is scoped to that setup process and leaves recognized operating systems untouched.
 
 ## Features
 - **Core CLI:** `seven init`, `seven up`, `seven destroy`, `seven status`, `seven list`.

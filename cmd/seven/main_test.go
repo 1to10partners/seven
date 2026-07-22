@@ -276,6 +276,23 @@ func TestSevenUpGstackInstallsChromiumSystemDeps(t *testing.T) {
 	if deps > setup {
 		t.Fatalf("expected Chromium system-deps install before ./setup, got: %s", log)
 	}
+	for _, want := range []string{
+		`ubuntu_major="${VERSION_ID%%.*}"`,
+		`PLAYWRIGHT_HOST_PLATFORM_OVERRIDE="ubuntu24.04-x64"`,
+		`PLAYWRIGHT_HOST_PLATFORM_OVERRIDE="ubuntu24.04-arm64"`,
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("expected Ubuntu 26+ Playwright compatibility guard %q, got: %s", want, log)
+		}
+	}
+	compatibility := strings.Index(log, "gstackPlaywrightPlatformCmd")
+	if compatibility >= 0 {
+		t.Fatalf("expected expanded compatibility command, got identifier in log: %s", log)
+	}
+	override := strings.Index(log, "PLAYWRIGHT_HOST_PLATFORM_OVERRIDE")
+	if override < 0 || override > deps {
+		t.Fatalf("expected Playwright platform override before dependency install, got: %s", log)
+	}
 }
 
 func TestSevenUpSkipsGstackWithoutFlag(t *testing.T) {
@@ -982,6 +999,29 @@ func TestSevenUpExistingSpriteRefreshesConsoleBootstrap(t *testing.T) {
 	}
 }
 
+func TestSevenUpExplicitCodexAssistantOverridesUsableClaudeAuth(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	log := runSevenUpForLog(t, repo, state, logPath, []string{
+		`SPRITE_EXEC_CLAUDE_AUTH_STATUS_JSON={"loggedIn":true}`,
+	}, "--no-console", "--assistant", "codex")
+	if !strings.Contains(log, "SEVEN_ASSISTANT=codex") {
+		t.Fatalf("expected explicit Codex assistant to override usable Claude auth, got: %s", log)
+	}
+}
+
+func TestSevenUpRejectsUnknownAssistant(t *testing.T) {
+	repo := createTempRepo(t)
+	cmd := exec.Command(testSevenBin, "up", "--no-tui", "--assistant", "cursor")
+	cmd.Dir = repo
+	output, err := cmd.CombinedOutput()
+	if err == nil || !bytes.Contains(output, []byte(`unsupported assistant "cursor"`)) {
+		t.Fatalf("expected unsupported assistant error, err=%v output=%s", err, output)
+	}
+}
+
 func TestSevenUpLogsInWhenSpriteListFails(t *testing.T) {
 	repo := createTempRepo(t)
 	state, logPath, cleanup := createFakeSprite(t)
@@ -1068,6 +1108,34 @@ func TestSevenUpAutoUpgradesSpriteCLIWithNonInteractiveConfirmation(t *testing.T
 	}
 	if strings.Contains(string(logData), "upgrade (confirm failed)") {
 		t.Fatalf("expected upgrade confirmation to be provided, got: %s", logData)
+	}
+}
+
+func TestSevenUpTreatsLeadingVAsSameSpriteCLIVersion(t *testing.T) {
+	repo := createTempRepo(t)
+	state, logPath, cleanup := createFakeSprite(t)
+	defer cleanup()
+
+	cmd := exec.Command(testSevenBin, "up", "--assume-logged-in", "--no-console", "--no-tui")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"PATH="+filepath.Dir(state)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPRITE_STATE="+state,
+		"SPRITE_LOG="+logPath,
+		"SPRITE_UPGRADE_CHECK_LATEST=v0.0.1-rc46",
+		"SPRITE_UPGRADE_CHECK_CURRENT=0.0.1-rc46",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("seven up failed: %v\n%s", err, output)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected sprite log: %v", err)
+	}
+	if strings.Count(string(logData), "upgrade ") != 1 {
+		t.Fatalf("expected only the upgrade check for equivalent versions, got: %s", logData)
 	}
 }
 

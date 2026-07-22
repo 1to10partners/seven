@@ -32,6 +32,7 @@ type upOptions struct {
 	QuietExternal  bool
 	AssumeLoggedIn bool
 	OpenConsole    bool
+	Assistant      string
 	SpriteName     string
 	NewSprite      bool
 	ResolvedName   string
@@ -88,6 +89,25 @@ const (
 	// Keep the default used by the explicit --gstack flag immutable. Projects
 	// may request another immutable revision in their tooling manifest.
 	gstackDefaultRevision = "a3259400a366593e0c909dd9ac3e59752efd2488"
+	// Playwright in the pinned gstack revision recognizes Ubuntu through 24.04.
+	// Sprite images currently report Ubuntu 26.04, whose Chromium build is ABI-
+	// compatible with Playwright's Ubuntu 24.04 payload but has no registry key.
+	// Apply Playwright's supported host override only for Ubuntu 26+ and only
+	// during gstack setup; leave every recognized platform untouched.
+	gstackPlaywrightPlatformCmd = `if [ "$(uname -s)" = "Linux" ] && [ -z "${PLAYWRIGHT_HOST_PLATFORM_OVERRIDE:-}" ] && [ -r /etc/os-release ]; then
+  . /etc/os-release
+  ubuntu_major="${VERSION_ID%%.*}"
+  if [ "${ID:-}" = "ubuntu" ] && case "$ubuntu_major" in ''|*[!0-9]*) false ;; *) [ "$ubuntu_major" -ge 26 ] ;; esac; then
+    case "$(uname -m)" in
+      x86_64|amd64) PLAYWRIGHT_HOST_PLATFORM_OVERRIDE="ubuntu24.04-x64" ;;
+      aarch64|arm64) PLAYWRIGHT_HOST_PLATFORM_OVERRIDE="ubuntu24.04-arm64" ;;
+    esac
+    if [ -n "${PLAYWRIGHT_HOST_PLATFORM_OVERRIDE:-}" ]; then
+      export PLAYWRIGHT_HOST_PLATFORM_OVERRIDE
+      echo "[seven] using Playwright $PLAYWRIGHT_HOST_PLATFORM_OVERRIDE compatibility build for Ubuntu $VERSION_ID"
+    fi
+  fi
+fi`
 	// gstackChromiumDepsCmd installs the OS shared libraries Chromium links
 	// against (libglib-2.0, libnss3, libgbm, …). gstack's ./setup downloads the
 	// browser *binary* but not these system libs, so on a minimal sprite image
@@ -144,8 +164,8 @@ func usage() {
 	fmt.Printf("version: %s\n", version)
 	fmt.Println()
 	fmt.Println("Usage:")
-	fmt.Println("  seven init [--assume-logged-in] [--new] [--sprite name] [--gstack]")
-	fmt.Println("  seven up [N] [--assume-logged-in] [--new] [--sprite name] [--no-console] [--no-tui] [--gstack]")
+	fmt.Println("  seven init [--assume-logged-in] [--new] [--sprite name] [--assistant codex|claude] [--gstack]")
+	fmt.Println("  seven up [N] [--assume-logged-in] [--new] [--sprite name] [--assistant codex|claude] [--no-console] [--no-tui] [--gstack]")
 	fmt.Println("  seven destroy [name] [--sprite name]")
 	fmt.Println("  seven status")
 	fmt.Println("  seven list")
@@ -165,6 +185,16 @@ func printVersion() {
 	fmt.Println(version)
 }
 
+func normalizeAssistant(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "codex", "claude":
+		return value, nil
+	default:
+		return "", fmt.Errorf("unsupported assistant %q (use codex or claude)", value)
+	}
+}
+
 func cmdUp(args []string) {
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
 	noTUI := fs.Bool("no-tui", false, "disable TUI output")
@@ -172,6 +202,7 @@ func cmdUp(args []string) {
 	noConsole := fs.Bool("no-console", false, "do not open sprite console after up")
 	newSprite := fs.Bool("new", false, "create and select a new sibling sprite")
 	spriteName := fs.String("sprite", "", "use a specific sprite name")
+	assistant := fs.String("assistant", "", "preferred assistant: codex or claude")
 	gstack := fs.Bool("gstack", false, "install gstack (github.com/garrytan/gstack) into the sprite")
 
 	// An optional leading number (e.g. "seven up 2") selects sibling #N. It must
@@ -197,6 +228,11 @@ func cmdUp(args []string) {
 		fmt.Fprintln(os.Stderr, "seven up failed: sprite number cannot be combined with --new or --sprite")
 		os.Exit(1)
 	}
+	preferredAssistant, err := normalizeAssistant(*assistant)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "seven up failed: %v\n", err)
+		os.Exit(1)
+	}
 
 	shouldUseTUI := !*noTUI
 	styleEnabled = shouldUseTUI
@@ -205,6 +241,7 @@ func cmdUp(args []string) {
 		QuietExternal:  false,
 		AssumeLoggedIn: *assumeLoggedIn,
 		OpenConsole:    !*noConsole,
+		Assistant:      preferredAssistant,
 		SpriteName:     strings.TrimSpace(*spriteName),
 		NewSprite:      *newSprite,
 		InstallGstack:  *gstack,
@@ -243,18 +280,25 @@ func cmdInit(args []string) {
 	assumeLoggedIn := fs.Bool("assume-logged-in", false, "skip sprite login")
 	newSprite := fs.Bool("new", false, "create and select a new sibling sprite")
 	spriteName := fs.String("sprite", "", "use a specific sprite name")
+	assistant := fs.String("assistant", "", "preferred assistant: codex or claude")
 	gstack := fs.Bool("gstack", false, "install gstack (github.com/garrytan/gstack) into the sprite")
 	_ = fs.Parse(args)
 	if *newSprite && strings.TrimSpace(*spriteName) != "" {
 		fmt.Fprintln(os.Stderr, "seven init failed: --new and --sprite cannot be used together")
 		os.Exit(1)
 	}
+	preferredAssistant, err := normalizeAssistant(*assistant)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "seven init failed: %v\n", err)
+		os.Exit(1)
+	}
 
-	_, err := runInit(upOptions{
+	_, err = runInit(upOptions{
 		Logger:         func(msg string) { fmt.Println(msg) },
 		QuietExternal:  false,
 		AssumeLoggedIn: *assumeLoggedIn,
 		OpenConsole:    false,
+		Assistant:      preferredAssistant,
 		SpriteName:     strings.TrimSpace(*spriteName),
 		NewSprite:      *newSprite,
 		InstallGstack:  *gstack,
@@ -1012,7 +1056,7 @@ func maybeUpgradeSpriteCLI(opts upOptions) {
 		opts.Logger("[seven up] could not parse sprite upgrade check output; skipping auto-upgrade")
 		return
 	}
-	if latest == current {
+	if spriteVersionsEqual(latest, current) {
 		opts.Logger(fmt.Sprintf("[seven up] sprite CLI is up to date (%s)", current))
 		return
 	}
@@ -1028,6 +1072,10 @@ func maybeUpgradeSpriteCLI(opts upOptions) {
 		return
 	}
 	opts.Logger(fmt.Sprintf("[seven up] sprite CLI upgraded to %s", latest))
+}
+
+func spriteVersionsEqual(left, right string) bool {
+	return strings.TrimPrefix(left, "v") == strings.TrimPrefix(right, "v")
 }
 
 func parseSpriteUpgradeCheckOutput(out string) (latest, current string, ok bool) {
@@ -1167,6 +1215,7 @@ gstack_staging=""
 rm -rf "$gstack_backup"
 cd "` + gstackSkillDir + `"
 bun install --frozen-lockfile
+` + gstackPlaywrightPlatformCmd + `
 ` + gstackChromiumDepsCmd + `
 ./setup --host auto --no-team`
 	if out, err := spriteExecOutput(spriteName, nil, "sh", "-lc", install); err != nil {
@@ -1764,6 +1813,10 @@ func detectHostAssistantState(opts upOptions) hostAssistantState {
 	state.ClaudeCredentials = detectHostClaudeCredentials(opts)
 	state.CodexAuthPath = detectHostCodexChatGPTAuth(opts)
 	state.CodexConfigPath = detectHostCodexConfig(opts)
+	if opts.Assistant != "" {
+		state.PreferredAssistant = opts.Assistant
+		return state
+	}
 
 	switch {
 	case state.ClaudeAuthPath != "":
@@ -1797,6 +1850,9 @@ func syncHostAssistantState(spriteName string, state hostAssistantState, phase s
 }
 
 func resolvePreferredAssistantInSprite(spriteName string, state hostAssistantState, phase string, opts upOptions) string {
+	if opts.Assistant != "" {
+		return opts.Assistant
+	}
 	if loggedIn, err := spriteClaudeLoggedIn(spriteName); err != nil {
 		opts.Logger(fmt.Sprintf("%s claude auth validation failed: %v", phase, err))
 	} else if loggedIn {
