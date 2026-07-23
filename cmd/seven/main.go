@@ -1177,9 +1177,11 @@ chmod 600 "` + sevenConsoleMarkerPath + `"
 	return spriteExec(spriteName, env, opts.QuietExternal, "sh", "-lc", cmd)
 }
 
-// maybeInstallGstack installs gstack inside the sprite when explicitly requested
-// or declared by the repository tooling manifest. Setup targets every supported
-// assistant present in the sprite, so Claude Code and Codex share one checkout.
+// maybeInstallGstack installs or repairs gstack inside the sprite when explicitly
+// requested or declared by the repository tooling manifest. A healthy immutable
+// checkout takes a read-only fast path, so routine seven up calls do not redownload
+// the checkout, dependencies, and browser. Setup targets every supported assistant
+// present in the sprite, so Claude Code and Codex share one checkout.
 func maybeInstallGstack(spriteName, assistant, revision string, opts upOptions) error {
 	if !opts.InstallGstack {
 		return nil
@@ -1193,9 +1195,21 @@ func maybeInstallGstack(spriteName, assistant, revision string, opts upOptions) 
 		return fmt.Errorf("bun is required for gstack but is absent from the Sprite image")
 	}
 
-	// Fetch and verify an immutable revision in a fresh staging repository. We
-	// never run Git or tool code through an existing checkout: even .git/config,
-	// the index, ignored dependencies, and generated binaries are untrusted.
+	// Do not execute code from the persistent checkout while deciding whether it
+	// is healthy. Verify the immutable pin, tracked-file cleanliness, generated
+	// browse binary, Playwright browser artifact, and every Codex skill link using
+	// only Git/file metadata. Any missing invariant falls through to a fresh,
+	// verified replacement below.
+	probe := gstackHealthProbe(revision)
+	if err := spriteExec(spriteName, nil, true, "sh", "-lc", probe); err == nil {
+		opts.Logger("[seven init] gstack already healthy — skipping setup and browser download")
+		return nil
+	}
+
+	// Fetch and verify an immutable revision in a fresh staging repository. The
+	// probe above is metadata-only; installation never executes tool code from
+	// an existing checkout because ignored dependencies and generated binaries
+	// are not covered by Git's object integrity.
 	opts.Logger("[seven init] installing gstack into sprite (includes a browser download; can take a few minutes)")
 	install := `set -e
 export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
@@ -1244,6 +1258,54 @@ bun install --frozen-lockfile
 	}
 	opts.Logger("[seven init] gstack installed")
 	return nil
+}
+
+func gstackHealthProbe(revision string) string {
+	return `set -eu
+# SEVEN_GSTACK_HEALTHY
+gstack_dir="` + gstackSkillDir + `"
+[ -d "$gstack_dir/.git" ]
+[ "$(git -c core.hooksPath=/dev/null -c core.fsmonitor=false -C "$gstack_dir" rev-parse HEAD)" = "` + revision + `" ]
+git -c core.hooksPath=/dev/null -c core.fsmonitor=false -C "$gstack_dir" diff-index --quiet HEAD --
+[ -x "$gstack_dir/browse/dist/browse" ]
+[ "$(wc -c < "$gstack_dir/browse/dist/browse")" -ge 1048576 ]
+python3 - "$gstack_dir/node_modules/playwright-core/browsers.json" "$HOME/.cache/ms-playwright" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+metadata = Path(sys.argv[1])
+cache = Path(sys.argv[2])
+with metadata.open() as handle:
+    browsers = json.load(handle)["browsers"]
+required = {
+    browser["name"]: browser["revision"]
+    for browser in browsers
+    if browser.get("installByDefault") and browser["name"].startswith("chromium")
+}
+if not required:
+    raise SystemExit(1)
+for name, revision in required.items():
+    install = cache / f"{name.replace('-', '_')}-{revision}"
+    if not install.is_dir() or not (install / "INSTALLATION_COMPLETE").is_file():
+        raise SystemExit(1)
+    executable_name = "chrome-headless-shell" if name == "chromium-headless-shell" else "chrome"
+    if not any(
+        path.is_file() and path.stat().st_mode & 0o111
+        for path in install.rglob("*")
+        if path.name == executable_name
+    ):
+        raise SystemExit(1)
+PY
+[ "$(readlink -f "$HOME/.codex/skills/gstack/bin")" = "$(readlink -f "$gstack_dir/bin")" ]
+[ "$(readlink -f "$HOME/.codex/skills/gstack/browse/dist")" = "$(readlink -f "$gstack_dir/browse/dist")" ]
+for source_skill in "$gstack_dir"/.agents/skills/*/SKILL.md; do
+  [ -r "$source_skill" ]
+  skill_name="$(basename "$(dirname "$source_skill")")"
+  destination_skill="$HOME/.codex/skills/$skill_name/SKILL.md"
+  [ -r "$destination_skill" ]
+  [ "$(readlink -f "$destination_skill")" = "$(readlink -f "$source_skill")" ]
+done`
 }
 
 // gstackOutputTail formats the last few lines of captured command output for
