@@ -889,16 +889,140 @@ func runInstallScriptResult(t *testing.T, script, binDir string) (string, error)
 	return string(out), runErr
 }
 
-func TestSevenUpGstackReinstallsWhenAlreadyPresent(t *testing.T) {
+func TestSevenUpGstackSkipsSetupWhenAlreadyHealthy(t *testing.T) {
 	repo := createTempRepo(t)
 	state, logPath, cleanup := createFakeSprite(t)
 	defer cleanup()
 
-	// gstack's ./setup is idempotent and is the documented fix for a partial
-	// install, so we always (re-)run it rather than skipping when present.
 	log := runSevenUpForLog(t, repo, state, logPath, []string{"SPRITE_EXEC_GSTACK_PRESENT=1"}, "--gstack")
-	if !strings.Contains(log, "garrytan/gstack") {
-		t.Fatalf("expected gstack setup to run even when already installed, got: %s", log)
+	if strings.Contains(log, gstackRepoURL) || strings.Contains(log, "./setup --host auto --no-team") {
+		t.Fatalf("expected healthy gstack to skip checkout and browser setup, got: %s", log)
+	}
+	if !strings.Contains(log, "SEVEN_GSTACK_HEALTHY") {
+		t.Fatalf("expected the gstack health probe to run, got: %s", log)
+	}
+}
+
+func TestGstackHealthProbeChecksExactBrowserAndCodexLinks(t *testing.T) {
+	home := t.TempDir()
+	gstackDir := filepath.Join(home, ".claude", "skills", "gstack")
+	sourceSkill := filepath.Join(gstackDir, ".agents", "skills", "gstack-test", "SKILL.md")
+	browseBin := filepath.Join(gstackDir, "browse", "dist", "browse")
+	browserMetadata := filepath.Join(gstackDir, "node_modules", "playwright-core", "browsers.json")
+	for _, dir := range []string{
+		filepath.Dir(sourceSkill),
+		filepath.Dir(browseBin),
+		filepath.Dir(browserMetadata),
+		filepath.Join(gstackDir, "bin"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(sourceSkill, []byte("---\nname: test\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	browseFile, err := os.OpenFile(browseBin, os.O_CREATE|os.O_WRONLY, 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := browseFile.Truncate(1048576); err != nil {
+		_ = browseFile.Close()
+		t.Fatal(err)
+	}
+	if err := browseFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	metadata := `{"browsers":[{"name":"chromium","revision":"1234","installByDefault":true}]}`
+	if err := os.WriteFile(browserMetadata, []byte(metadata), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	browserBin := filepath.Join(home, ".cache", "ms-playwright", "chromium-1234", "chrome-linux64", "chrome")
+	if err := os.MkdirAll(filepath.Dir(browserBin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(browserBin, []byte("browser"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	browserComplete := filepath.Join(
+		home,
+		".cache",
+		"ms-playwright",
+		"chromium-1234",
+		"INSTALLATION_COMPLETE",
+	)
+	if err := os.WriteFile(browserComplete, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(home, ".codex", "skills", "gstack-test")
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Dir(sourceSkill), destination); err != nil {
+		t.Fatal(err)
+	}
+	codexGstack := filepath.Join(home, ".codex", "skills", "gstack")
+	if err := os.MkdirAll(filepath.Join(codexGstack, "browse"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	codexBin := filepath.Join(codexGstack, "bin")
+	if err := os.Symlink(filepath.Join(gstackDir, "bin"), codexBin); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(
+		filepath.Join(gstackDir, "browse", "dist"),
+		filepath.Join(codexGstack, "browse", "dist"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", gstackDir}, args...)...)
+		cmd.Env = append(os.Environ(), "HOME="+home)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git("init")
+	git("add", ".agents/skills/gstack-test/SKILL.md")
+	git("-c", "user.name=Seven Test", "-c", "user.email=seven@example.test", "commit", "-m", "fixture")
+	revision := git("rev-parse", "HEAD")
+
+	runProbe := func() error {
+		t.Helper()
+		cmd := exec.Command("sh", "-lc", gstackHealthProbe(revision))
+		cmd.Env = append(os.Environ(), "HOME="+home)
+		return cmd.Run()
+	}
+	if err := runProbe(); err != nil {
+		t.Fatalf("healthy fixture failed probe: %v", err)
+	}
+	if err := os.Remove(codexBin); err != nil {
+		t.Fatal(err)
+	}
+	if err := runProbe(); err == nil {
+		t.Fatal("probe accepted a missing root gstack bin link")
+	}
+	if err := os.Symlink(filepath.Join(gstackDir, "bin"), codexBin); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(browserComplete); err != nil {
+		t.Fatal(err)
+	}
+	if err := runProbe(); err == nil {
+		t.Fatal("probe accepted a Playwright install without its completion marker")
+	}
+	if err := os.WriteFile(browserComplete, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(browserBin); err != nil {
+		t.Fatal(err)
+	}
+	if err := runProbe(); err == nil {
+		t.Fatal("probe accepted a missing pinned browser executable")
 	}
 }
 
@@ -961,7 +1085,7 @@ func TestSevenUpRetriesGstackWhenHTTPPostLosesExitFrame(t *testing.T) {
 	}
 	var gstackCalls []string
 	for _, line := range strings.Split(string(logData), "\n") {
-		if strings.Contains(line, "exec ") && strings.Contains(line, "-- sh -lc set -e") {
+		if strings.Contains(line, "exec ") && strings.HasSuffix(line, "-- sh -lc set -e") {
 			gstackCalls = append(gstackCalls, line)
 		}
 	}
@@ -2929,6 +3053,12 @@ case "$cmd" in
         fi
         exit 0
         ;;
+	  *SEVEN_GSTACK_HEALTHY*)
+		if [ "${SPRITE_EXEC_GSTACK_PRESENT:-}" = "1" ]; then
+		  exit 0
+		fi
+		exit 1
+		;;
 	  *"rev-parse HEAD"*)
 		if [ "${SPRITE_EXEC_CLONED_HEAD_FAIL:-}" = "1" ]; then
 		  exit 1
